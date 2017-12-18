@@ -1,4 +1,9 @@
 experiment
 MeshSampleWrapper/cmake-*
 MeshSampleWrapper/.*
-MeshSampleWrapper/build 
+MeshSampleWrapper/build
+VanillaPointNet/train
+VanillaPointNet/data
+VanillaPointNet/model
+.*
+*.pyc
