@@ -15,3 +15,6 @@ void transformToRelativePolarForm(
         const std::vector<double> &pts,
         std::vector<double> &relative_polar_pts
 );
+
+
+void rotatePointCloud(std::vector<double>& point_cloud);

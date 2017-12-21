@@ -3,7 +3,7 @@ project(MeshSampleWrapper)
 
 set(CMAKE_CXX_STANDARD 11)
 
-set(MESH_SAMPLE_SOURCE batch_file_io.cpp batch_file_io.h mesh_sample.cpp mesh_sample.h preprocess.cpp preprocess.h)
+set(MESH_SAMPLE_SOURCE  preprocess.cpp preprocess.h batch_file_io.cpp batch_file_io.h mesh_sample.cpp mesh_sample.h)
 
 set(MESH_SAMPLE_TEST_SOURCE ${MESH_SAMPLE_SOURCE} test.cpp)
 

@@ -16,4 +16,6 @@ void sampleMeshPoints(
         std::vector<double>& point_cloud
 );
 
+double uniform_rand();
+
 #endif //MESHSAMPLE_MESH_SAMPLE_H

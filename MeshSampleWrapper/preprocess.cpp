@@ -2,7 +2,10 @@
 // Created by pal on 17-12-13.
 //
 #include "preprocess.h"
+#include "mesh_sample.h"
+
 #include <cmath>
+#include <random>
 
 void transformToRelativePolarForm(
         const std::vector<double> &pts,
@@ -61,5 +64,22 @@ void transformToRelativePolarForm(
             relative_polar_pts[result_index2+4]=polar_pts[pt_index2+2];                    // h2
             k++;
         }
+    }
+}
+
+
+void rotatePointCloud(std::vector<double>& point_cloud)
+{
+    double phi=uniform_rand()*2*M_PI;
+    double cos_val=cos(phi);
+    double sin_val=sin(phi);
+    for(size_t i=0;i<point_cloud.size()/3;i++)
+    {
+        double x0=point_cloud[i*3];
+        double y0=point_cloud[i*3+1];
+        double x=x0*cos_val-y0*sin_val;
+        double y=x0*sin_val+y0*cos_val;
+        point_cloud[i*3]=x;
+        point_cloud[i*3+1]=y;
     }
 }

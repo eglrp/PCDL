@@ -7,3 +7,4 @@ VanillaPointNet/data
 VanillaPointNet/model
 .*
 *.pyc
+cmake-*

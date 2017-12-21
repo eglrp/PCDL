@@ -3,6 +3,7 @@ import math
 import time
 import random
 from concurrent.futures import ThreadPoolExecutor
+import math
 
 import PointSample
 
@@ -23,15 +24,34 @@ def normalize(pcs):
     :return:
     '''
     eps=1e-8
-    min_val=np.expand_dims(np.min(pcs,axis=1),axis=1)
-    max_val=np.expand_dims(np.max(pcs,axis=1),axis=1)
-    pcs=(2*pcs-(max_val+min_val))/(max_val-min_val+eps)
+    pcs-=(np.max(pcs,axis=1,keepdims=True)+np.min(pcs,axis=1,keepdims=True))/2.0  #centralize
+    dist=pcs[:,:,0]**2+pcs[:,:,1]**2+pcs[:,:,2]**2
+    max_dist=np.sqrt(np.max(dist,axis=1,keepdims=True))
+    pcs/=(np.expand_dims(max_dist,axis=2)+eps)
     return pcs
 
 
+def rotate(pcs):
+    '''
+    :param pcs: [n,k,3]
+    :return:
+    '''
+    rotated_data = np.empty(pcs.shape, dtype=np.float32)
+    for k in range(pcs.shape[0]):
+        rotation_angle = np.random.uniform() * 2 * np.pi
+        cosval = np.cos(rotation_angle)
+        sinval = np.sin(rotation_angle)
+        rotation_matrix = np.array([[cosval, -sinval, 0],
+                                    [sinval, cosval,  0],
+                                    [      0,      0, 1]],dtype=np.float32)
+        shape_pc = pcs[k, ...]
+        rotated_data[k, ...] = np.dot(shape_pc, rotation_matrix)
+    return rotated_data
+
 class ModelBatchReader:
 
-    def __init__(self,batch_files,batch_size,thread_num,model='train'):
+    def __init__(self,batch_files,batch_size,thread_num,pt_num,input_dims,model='train',
+                 read_func=PointSample.getPointCloudRelativePolarForm,aug_func=None):
         self.example_list = []
         for f in batch_files:
             model_num=PointSample.getModelNum(f)
@@ -46,12 +66,21 @@ class ModelBatchReader:
         self.executor=ThreadPoolExecutor(max_workers=thread_num)
         self.batch_size=batch_size
         self.total_size=len(self.example_list)
+        self.pt_num=pt_num
+        self.input_dims=input_dims
+        self.aug_func=aug_func
+        self.read_func=read_func
 
-    def get_batch(self,pt_num,input_dims,func=PointSample.getPointCloudRelativePolarForm,aug_func=None):
+    def __iter__(self):
+        return self
 
-        if self.cur_pos>self.total_size and self.model=='test':
+    def next(self):
+
+        if self.cur_pos>self.total_size:
             self.cur_pos=0
-            return None,None
+            if self.model=='train':
+                random.shuffle(self.example_list)
+            raise StopIteration
 
         cur_read_size=min(self.total_size-self.cur_pos,self.batch_size)
         cur_batch_list=[]
@@ -61,39 +90,35 @@ class ModelBatchReader:
             cur_sample_size=self.batch_size-cur_read_size
             if cur_sample_size>0:
                 for _ in xrange(cur_sample_size):
-                    sample_index=random.randint(0,len(self.example_list))
+                    sample_index=random.randint(0,len(self.example_list)-1)
                     cur_batch_list.append(self.example_list[sample_index])
 
         file_names=[t[0] for t in cur_batch_list]
         model_indices=[t[1] for t in cur_batch_list]
-        pt_nums=[pt_num for _ in xrange(len(cur_batch_list))]
+        pt_nums=[self.pt_num for _ in xrange(len(cur_batch_list))]
 
         input_total_dim=1
-        if input_dims is list:
-            for dim in input_dims:
+        if self.input_dims is list:
+            for dim in self.input_dims:
                 input_total_dim*=dim
 
-            input_shapes=[pt_num*input_dims[0],input_dims[1]]       # [pt_num*(pt_num-1),5]
+            input_shapes=[self.pt_num*self.input_dims[0],self.input_dims[1]]       # [pt_num*(pt_num-1),5]
         else:
-            input_total_dim=input_dims
-            input_shapes=[pt_num,input_dims]                        # [pt_num,3]
+            input_total_dim=self.input_dims
+            input_shapes=[self.pt_num,self.input_dims]                        # [pt_num,3]
 
         inputs=[]
         labels=[]
-        results=self.executor.map(func, file_names, model_indices, pt_nums)
+        results=self.executor.map(self.read_func, file_names, model_indices, pt_nums)
         for input,label in results:
-            data=np.frombuffer(input,dtype=np.float64,count=pt_num*input_total_dim)
+            data=np.frombuffer(input,dtype=np.float64,count=self.pt_num*input_total_dim)
             inputs.append(np.reshape(data,input_shapes).astype(np.float32))
             labels.append(label)
 
-        if aug_func is not None:
-            inputs=aug_func(np.asarray(inputs))
+        if self.aug_func is not None:
+            inputs=self.aug_func(np.asarray(inputs))
 
         self.cur_pos+=self.batch_size
-        if self.cur_pos>self.total_size:
-            if self.model=='train':
-                self.cur_pos=0
-                random.shuffle(self.example_list)
 
         return np.expand_dims(np.asarray(inputs),axis=3),np.asarray(labels)
 
@@ -104,28 +129,33 @@ def test_reader():
     thread_num=2
     pt_num=2048
     point_stddev=1e-2
-    reader=ModelBatchReader(batch_files,batch_size,thread_num,model='test')
     batch_num=1#int(math.ceil(reader.total_size/float(batch_size)))
 
     begin=time.time()
 
-    # read_func=partial(read_process_func,func=PointSample.getPointCloud,noise_aug=True,stddev=1e-2)
-
     def aug_func(pcs):
+        pcs=normalize(pcs)
         pcs=add_noise(pcs,point_stddev)
+        pcs=rotate(pcs)
         pcs=normalize(pcs)
         return pcs
 
-    for i in range(batch_num):
-        data,label=reader.get_batch(pt_num,3,PointSample.getPointCloud,aug_func)
+    reader=ModelBatchReader(batch_files,batch_size,thread_num,pt_num,3,
+                            model='test',read_func=PointSample.getPointCloud,aug_func=aug_func)
 
-        for l in xrange(len(label)):
-            with open('test{0}_{1}.txt'.format(i,l),'w') as f:
-                for k in range(pt_num):
-                    f.write('{0} {1} {2}\n'.format(data[l][k,0,0],data[l][k,1,0],data[l][k,2,0]))
+    i=0
+    for data,label in reader:
+        if random.random()<1.0:
+            for l in xrange(len(label)):
+                with open('test{0}_{1}.txt'.format(i,l),'w') as f:
+                    for k in range(pt_num):
+                        f.write('{0} {1} {2}\n'.format(data[l][k,0,0],data[l][k,1,0],data[l][k,2,0]))
+        i+=1
+        break
+        pass
 
 
-    print '{} examples per second'.format(batch_size*batch_num/(time.time()-begin))
+    print '{} examples per second'.format(reader.total_size/float(time.time()-begin))
 
 
 

@@ -11,7 +11,7 @@ std::random_device rd;
 std::default_random_engine gen(rd());
 std::uniform_real_distribution<double> dis(0.0,1.0);
 
-inline double uniform_rand()
+double uniform_rand()
 {
     return dis(gen);
 }
@@ -71,3 +71,4 @@ void sampleMeshPoints(
                        point_cloud[i*3],point_cloud[i*3+1],point_cloud[i*3+2]);
     }
 }
+

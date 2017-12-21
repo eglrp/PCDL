@@ -49,6 +49,33 @@ getPointCloud(PyObject* self,PyObject* args)
 }
 
 static PyObject*
+getRotatedPointCloud(PyObject* self,PyObject* args)
+{
+    const char* filename;
+    unsigned int index;
+    unsigned int point_num;
+    if(!PyArg_ParseTuple(args,"sii",&filename,&index,&point_num))
+        return NULL;
+
+    //read data
+    std::vector<double> vertexes;
+    std::vector<unsigned int> faces;
+    std::vector<double> areas;
+    double total_area;
+    unsigned int category;
+    readBatchFileData(filename,index,vertexes,faces,areas,total_area,category);
+
+    //sample points
+    std::vector<double> point_cloud;
+    sampleMeshPoints(vertexes,faces,areas,total_area,point_num,point_cloud);
+
+    //rotated point cloud
+    rotatePointCloud(point_cloud);
+
+    return Py_BuildValue("s#i", reinterpret_cast<char *>(point_cloud.begin().base()),point_cloud.size()*sizeof(double),category);
+}
+
+static PyObject*
 getPointCloudRelativePolarForm(PyObject* self,PyObject* args)
 {
     const char* filename;
@@ -80,6 +107,8 @@ getPointCloudRelativePolarForm(PyObject* self,PyObject* args)
 static PyMethodDef SampleMethods[]={
         {"getModelNum",getModelNum,METH_VARARGS,"get the model number in the given bat file"},
         {"getPointCloud",getPointCloud,METH_VARARGS,"sample n points of the ith model in the given file"},
+        {"getRotatedPointCloud",getRotatedPointCloud,
+                METH_VARARGS,"sample n points of the ith model in the given file, and rotate it around z axis"},
         {"getPointCloudRelativePolarForm",getPointCloudRelativePolarForm,
                 METH_VARARGS,"sample n points of the ith model in the given file return its relative polar form"},
         {NULL,NULL,NULL,NULL}

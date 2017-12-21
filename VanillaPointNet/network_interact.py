@@ -1,32 +1,101 @@
 import tensorflow as tf
 import re
-import tf_utils
 
 
-def log_str(message):
-    print message
-    with open('log.log','a') as f:
-        f.write(message)
+def _activation_summary(x):
+    tensor_name=re.sub('tower_[0-9]*/','',x.op.name)
+    tf.summary.histogram(tensor_name+'/activation',x)
+    tf.summary.scalar(tensor_name+'/sparsity',tf.nn.zero_fraction(x))
 
-def inference(input,is_training,num_classes,input_dim,bn_decay):
-    mlp1=tf_utils.conv2d(input,64,[1,input_dim],'mlp1',[1,1],'VALID',bn=True,is_training=is_training,bn_decay=bn_decay)
-    mlp2=tf_utils.conv2d(mlp1,64,[1,1],'mlp2',[1,1],'VALID',bn=True,is_training=is_training,bn_decay=bn_decay)
-    mlp3=tf_utils.conv2d(mlp2,64,[1,1],'mlp3',[1,1],'VALID',bn=True,is_training=is_training,bn_decay=bn_decay)
-    mlp4=tf_utils.conv2d(mlp3,128,[1,1],'mlp4',[1,1],'VALID',bn=True,is_training=is_training,bn_decay=bn_decay)
-    mlp5=tf_utils.conv2d(mlp4,1024,[1,1],'mlp5',[1,1],'VALID',bn=True,is_training=is_training,bn_decay=bn_decay)
+
+def _variable_with_weight_decay(name,shape,initializer,wd=None):
+    with tf.device('/cpu:0'):
+        var=tf.get_variable(name,shape,
+                            initializer=initializer)
+
+    if wd is not None:
+        weight_decay=tf.multiply(tf.nn.l2_loss(var),wd,name='l2_weight_decay_loss')
+        tf.add_to_collection('losses',weight_decay)
+
+    return var
+
+
+def inference(input,num_classes,input_dim,stddev=1e-2,wd=None,with_avg_add=False):
+    with tf.variable_scope('mlp1'):
+        weights=_variable_with_weight_decay('weights',[1,input_dim,1,64],tf.truncated_normal_initializer(stddev=stddev),wd)
+        biases=_variable_with_weight_decay('biases',[64],tf.constant_initializer(0))
+
+    with tf.name_scope('mlp1'):
+        mlp1=tf.nn.conv2d(input,weights,(1,1,1,1),'VALID')
+        mlp1=tf.nn.bias_add(mlp1,biases)
+        mlp1=tf.nn.relu(mlp1)
+        if with_avg_add:
+            mlp1+=tf.reduce_mean(mlp1,axis=1,keep_dims=True)
+        _activation_summary(mlp1)
+
+    with tf.variable_scope('mlp2'):
+        weights=_variable_with_weight_decay('weights',[1,1,64,128],tf.truncated_normal_initializer(stddev=stddev),wd)
+        biases=_variable_with_weight_decay('biases',[128],tf.constant_initializer(0))
+
+    with tf.name_scope('mlp2'):
+        mlp2=tf.nn.conv2d(mlp1,weights,(1,1,1,1),'VALID')
+        mlp2=tf.nn.bias_add(mlp2,biases)
+        mlp2=tf.nn.relu(mlp2)
+        if with_avg_add:
+            mlp2+=tf.reduce_mean(mlp2,axis=1,keep_dims=True)
+        _activation_summary(mlp2)
+
+    with tf.variable_scope('mlp3'):
+        weights=_variable_with_weight_decay('weights',[1,1,128,512],tf.truncated_normal_initializer(stddev=stddev),wd)
+        biases=_variable_with_weight_decay('biases',[512],tf.constant_initializer(0))
+
+    with tf.name_scope('mlp3'):
+        mlp3=tf.nn.conv2d(mlp2,weights,(1,1,1,1),'VALID')
+        mlp3=tf.nn.bias_add(mlp3,biases)
+        mlp3=tf.nn.relu(mlp3)
+        if with_avg_add:
+            mlp3+=tf.reduce_mean(mlp3,axis=1,keep_dims=True)
+        _activation_summary(mlp3)
+
+    with tf.variable_scope('mlp4'):
+        weights=_variable_with_weight_decay('weights',[1,1,512,1024],tf.truncated_normal_initializer(stddev=stddev),wd)
+        biases=_variable_with_weight_decay('biases',[1024],tf.constant_initializer(0))
+
+    with tf.name_scope('mlp4'):
+        mlp4=tf.nn.conv2d(mlp3,weights,(1,1,1,1),'VALID')
+        mlp4=tf.nn.bias_add(mlp4,biases)
+        mlp4=tf.nn.relu(mlp4)
+        if with_avg_add:
+            mlp4+=tf.reduce_mean(mlp4,axis=1,keep_dims=True)
+        _activation_summary(mlp4)
+
+    with tf.variable_scope('mlp5'):
+        weights = _variable_with_weight_decay('weights', [1, 1, 1024, 2048],
+                                              tf.truncated_normal_initializer(stddev=stddev), wd)
+        biases = _variable_with_weight_decay('biases', [2048], tf.constant_initializer(0))
+
+    with tf.name_scope('mlp5'):
+        mlp5=tf.nn.conv2d(mlp4,weights,(1,1,1,1),'VALID')
+        mlp5=tf.nn.bias_add(mlp5,biases)
+        # mlp5=tf.nn.relu(mlp5)
+        if with_avg_add:
+            mlp5+=tf.reduce_mean(mlp5,axis=1,keep_dims=True)
+        _activation_summary(mlp5)
 
     with tf.name_scope('global_pool'):
         feature_pool=tf.reduce_max(mlp5,axis=1,name='pooling')
-        feature_pool=tf.reshape(feature_pool,[-1,1024])
-        feature_pool =tf.cond(is_training,
-            lambda: tf.nn.dropout(feature_pool,0.7),
-            lambda: feature_pool)
+        feature_pool=tf.reshape(feature_pool,[-1,2048])
+        _activation_summary(feature_pool)
 
-    fc1=tf_utils.fully_connected(feature_pool,512,'fc1',bn=True,bn_decay=bn_decay,is_training=is_training)
-    fc2=tf_utils.fully_connected(fc1,256,'fc2',bn=True,bn_decay=bn_decay,is_training=is_training)
-    fc3=tf_utils.fully_connected(fc2,num_classes,'fc3',bn=True,bn_decay=bn_decay,is_training=is_training)
+    with tf.variable_scope('fc'):
+        weights=_variable_with_weight_decay('weights',[2048,num_classes],tf.truncated_normal_initializer(stddev=stddev),wd)
+        biases=_variable_with_weight_decay('biases',[num_classes],tf.constant_initializer(0))
 
-    return fc3
+    with tf.name_scope('fc'):
+        fc=tf.add(tf.matmul(feature_pool,weights),biases)
+        _activation_summary(fc)
+
+    return fc
 
 
 def loss(logits,labels):
@@ -39,7 +108,7 @@ def loss(logits,labels):
     return tf.add_n(tf.get_collection('losses'),name='total_loss')
 
 
-def tower_loss(scope, pcs, labels, is_training, num_classes, input_dim, bn_decay):
+def tower_loss(scope, pcs, labels,num_classes, input_dim, stddev, wd):
     """Calculate the total loss on a single tower running the CIFAR model.
     Args:
     scope: unique prefix string identifying the CIFAR tower, e.g. 'tower_0'
@@ -50,7 +119,7 @@ def tower_loss(scope, pcs, labels, is_training, num_classes, input_dim, bn_decay
     """
 
     # Build inference Graph.
-    logits = inference(pcs, is_training, num_classes,input_dim, bn_decay)
+    logits = inference(pcs,num_classes,input_dim, wd=wd,stddev=stddev,with_avg_add=False)
 
     # Build the portion of the Graph calculating the losses. Note that we will
     # assemble the total_loss using a custom function below.
@@ -110,56 +179,41 @@ def average_gradients(tower_grads):
     return average_grads
 
 
-def get_bn_decay(batch,batch_size):
-    bn_momentum = tf.train.exponential_decay(
-                      0.5,
-                      batch*batch_size,
-                      20000,
-                      0.8,
-                      staircase=True)
-    bn_decay = tf.minimum(0.99, 1 - bn_momentum)
-    return bn_decay
-
-
-def train_op(inputs,labels,batch_size,is_training,num_gpu,initial_lr,lr_decay_rate,num_batches_per_epoch,decay_epoch,
-             num_classes,input_dim,momentum=0.9):
+def train_op(inputs,labels,num_gpu,initial_lr,lr_decay_rate,num_batches_per_epoch,decay_epoch,
+             num_classes,input_dim,stddev=1e-1,momentum=0.9,wd=1e-3):
 
     global_step=tf.get_variable('global_step',shape=[],
                                 initializer=tf.constant_initializer(0),
                                 trainable=False)
-
-    bn_decay=get_bn_decay(global_step,batch_size)
-
     decay_steps=int(num_batches_per_epoch*decay_epoch)
     lr=tf.train.exponential_decay(initial_lr,global_step,decay_steps,lr_decay_rate,True)
-    # opt=tf.train.MomentumOptimizer(lr,momentum=momentum)
-    opt=tf.train.GradientDescentOptimizer(lr)
+    opt=tf.train.MomentumOptimizer(lr,momentum=momentum)
 
     tower_grads=[]
     tower_logits=[]
-    tower_losses=[]
     for i in xrange(num_gpu):
         with tf.device('/gpu:{}'.format(i)):
             with tf.name_scope('%s_%d'%('tower',i)) as scope:
 
                 if i==0:
                     with tf.variable_scope(tf.get_variable_scope(),reuse=False):
-                        loss_val,logits=tower_loss(scope,inputs[i],labels[i], is_training,num_classes,input_dim,bn_decay)
+                        loss_val,logits=tower_loss(scope,inputs[i],labels[i],num_classes,input_dim,stddev,wd)
                 else:
                     with tf.variable_scope(tf.get_variable_scope(),reuse=True):
-                        loss_val,logits=tower_loss(scope,inputs[i],labels[i], is_training,num_classes,input_dim,bn_decay)
+                        loss_val,logits=tower_loss(scope,inputs[i],labels[i],num_classes,input_dim,stddev,wd)
 
+                summaries=tf.get_collection(tf.GraphKeys.SUMMARIES,scope)
                 grads=opt.compute_gradients(loss_val)
-                tower_losses.append(loss_val)
                 tower_grads.append(grads)
                 tower_logits.append(logits)
 
     grads=average_gradients(tower_grads)
-    loss_val=tf.reduce_mean(tf.concat(tower_losses,axis=0))
 
-    summaries = tf.get_collection(tf.GraphKeys.SUMMARIES)
     summaries.append(tf.summary.scalar('learning_rate',lr))
-    summaries.append(tf.summary.scalar('loss_val',loss_val))
+
+    for grad,var in grads:
+        if grad is not None:
+            summaries.append(tf.summary.histogram(var.op.name+'/gradients',grad))
 
     apply_gradient_op=opt.apply_gradients(grads,global_step=global_step)
 
@@ -180,19 +234,17 @@ def train():
                  'data/ModelNet40/train2.batch',
                  'data/ModelNet40/train3.batch']
     batch_size=30
-    thread_num=2
+    thread_num=1
     gpu_num=2
 
-    initial_lr=1e-1
-    init_stddev=1e-3
-    lr_decay=0.85
+    initial_lr=1e-3
+    lr_decay=0.9
     decay_epoch=5
     num_classes=40
     input_dim=3
-    pt_num=2048
+    pt_num=2096
     train_epoch=100
     train_noise_stddev=1e-2
-    model_name='model/model.ckpt-16236'
 
     show_info_step=30
 
@@ -216,14 +268,13 @@ def train():
 
         inputs = []
         labels = []
-        is_training=tf.placeholder(tf.bool)
         for k in xrange(gpu_num):
             inputs.append(tf.placeholder(tf.float32,shape=[None,None,input_dim,1],name='input_placeholder_{}'.format(k)))
             labels.append(tf.placeholder(tf.int64,shape=[None,],name='label_placeholder_{}'.format(k)))
 
-        apply_gradient_op,summaries_op,tower_logits,loss =train_op(inputs,labels,batch_size,is_training,gpu_num,initial_lr,
-                                                                  lr_decay,num_batches_per_epoch,decay_epoch,
-                                                                  num_classes,input_dim)
+        apply_gradient_op,summaries_op,tower_logits,loss =train_op(inputs,labels,gpu_num,initial_lr,
+                                                              lr_decay,num_batches_per_epoch,decay_epoch,
+                                                              num_classes,input_dim,stddev=1e-1)
         summary_writer = tf.summary.FileWriter('train',tf.get_default_graph())
 
     config=tf.ConfigProto()
@@ -233,24 +284,22 @@ def train():
     sess.run(tf.global_variables_initializer())
 
     saver = tf.train.Saver(tf.global_variables())
-    # saver.restore(sess,model_name)
 
     begin_time=time.time()
     cost_time=0
     for step in xrange(train_steps):
         feed_dict={}
         for k in xrange(gpu_num):
-            data,label=reader.get_batch(pt_num,3,PointSample.getRotatedPointCloud,train_aug)
+            data,label=reader.get_batch(pt_num,3,PointSample.getPointCloud,train_aug)
 
             feed_dict[inputs[k]]=data
             feed_dict[labels[k]]=label
 
-        feed_dict[is_training]=True
         _,loss_val=sess.run([apply_gradient_op,loss],feed_dict)
 
         if step%show_info_step==0:
             cost_time+=time.time()-begin_time
-            log_str('loss_val:{} speed: {} examples per second'.format(loss_val/batch_size,show_info_step*2.0*batch_size/cost_time))
+            print 'loss_val:{} speed: {} examples per second'.format(loss_val/batch_size,show_info_step*2.0*batch_size/cost_time)
             cost_time=0
             begin_time=time.time()
 
@@ -270,7 +319,6 @@ def train():
                         break_flag=True
                         break
 
-                    feed_dict[is_training]=False
                     feed_dict[inputs[k]]=data
                     feed_dict[labels[k]]=label
 
@@ -281,9 +329,9 @@ def train():
                 for k,l in enumerate(logits):
                     correct_num+=np.sum(np.argmax(l,axis=1)==feed_dict[labels[k]])
 
-            # print 'predicting finished'
+            print 'predicting finished'
 
-            log_str('epoch {0} test acc:{1}'.format(step/num_batches_per_epoch,correct_num/float(test_reader.total_size)))
+            print 'epoch {0} test acc:{1}'.format(step/num_batches_per_epoch,correct_num/float(test_reader.total_size))
 
             #save
             saver.save(sess,'model/model.ckpt',global_step=step)
@@ -343,9 +391,8 @@ def test_over_fit_ability():
     # test_batch_files = ['data/ModelNet40/test0.batch']
     # test_reader = ModelBatchReader(test_batch_files, batch_size, thread_num)
 
-    num_batches_per_epoch = 500
+    num_batches_per_epoch = 1000
     train_steps = train_epoch * num_batches_per_epoch
-
 
     with tf.device('/cpu:0'):
 
@@ -356,10 +403,9 @@ def test_over_fit_ability():
                 tf.placeholder(tf.float32, shape=[None, None, input_dim, 1], name='input_placeholder_{}'.format(k)))
             labels.append(tf.placeholder(tf.int64, shape=[None, ], name='label_placeholder_{}'.format(k)))
 
-        is_training=tf.placeholder(tf.bool)
-        apply_gradient_op,summaries_op,tower_logits,loss =train_op(inputs,labels,batch_size,is_training,gpu_num,initial_lr,
-                                                                  lr_decay,num_batches_per_epoch,decay_epoch,
-                                                                  num_classes,input_dim)
+        apply_gradient_op, summaries_op, tower_logits, loss = train_op(inputs, labels, gpu_num, initial_lr,
+                                                                       lr_decay, num_batches_per_epoch, decay_epoch,
+                                                                       num_classes, input_dim)
         summary_writer = tf.summary.FileWriter('train', tf.get_default_graph())
 
     config = tf.ConfigProto()
@@ -385,8 +431,6 @@ def test_over_fit_ability():
 
             feed_dict[inputs[k]] = data
             feed_dict[labels[k]] = label
-
-        feed_dict[is_training] = True
 
         _, loss_val = sess.run([apply_gradient_op, loss], feed_dict)
 
@@ -416,7 +460,6 @@ def test_over_fit_ability():
                         break
                     feed_dict[inputs[k]] = data
                     feed_dict[labels[k]] = label
-                    feed_dict[is_training] = False
 
                 if break_flag:
                     break
@@ -438,6 +481,6 @@ def test_over_fit_ability():
             saver.save(sess, 'model/model.ckpt', global_step=step)
 
 if __name__=="__main__":
-    test_over_fit_ability()
+    train()
 
 
