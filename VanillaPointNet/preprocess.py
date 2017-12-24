@@ -48,6 +48,25 @@ def rotate(pcs):
         rotated_data[k, ...] = np.dot(shape_pc, rotation_matrix)
     return rotated_data
 
+
+def compute_dist(pcs):
+    '''
+    :param pcs:
+    :return:
+    '''
+    eps=1e-8
+    dists=np.empty([pcs.shape[0],pcs.shape[1],pcs.shape[1],1])
+    for i in xrange(pcs.shape[0]):
+        pc=pcs[i]
+        dist=np.sum((np.repeat(pc[:,None,:],pcs.shape[1],axis=1)-
+                    np.repeat(pc[None,:,:],pcs.shape[1],axis=0))**2,axis=2)
+        # print dist.shape
+        dists[i,:,:,:]=np.sqrt(dist+eps)
+
+    dists=np.reshape(dists,[pcs.shape[0],pcs.shape[1],pcs.shape[1]])
+
+    return dists
+
 class ModelBatchReader:
 
     def __init__(self,batch_files,batch_size,thread_num,pt_num,input_dims,model='train',
@@ -107,9 +126,9 @@ class ModelBatchReader:
             input_total_dim=self.input_dims
             input_shapes=[self.pt_num,self.input_dims]                        # [pt_num,3]
 
+        results=self.executor.map(self.read_func, file_names, model_indices, pt_nums)
         inputs=[]
         labels=[]
-        results=self.executor.map(self.read_func, file_names, model_indices, pt_nums)
         for input,label in results:
             data=np.frombuffer(input,dtype=np.float64,count=self.pt_num*input_total_dim)
             inputs.append(np.reshape(data,input_shapes).astype(np.float32))
@@ -141,23 +160,44 @@ def test_reader():
         return pcs
 
     reader=ModelBatchReader(batch_files,batch_size,thread_num,pt_num,3,
-                            model='test',read_func=PointSample.getPointCloud,aug_func=aug_func)
+                            model='test',read_func=PointSample.getPointCloud,
+                            aug_func=aug_func)
 
     i=0
     for data,label in reader:
-        if random.random()<1.0:
-            for l in xrange(len(label)):
-                with open('test{0}_{1}.txt'.format(i,l),'w') as f:
-                    for k in range(pt_num):
-                        f.write('{0} {1} {2}\n'.format(data[l][k,0,0],data[l][k,1,0],data[l][k,2,0]))
-        i+=1
-        break
-        pass
+        # if random.random()<1.0:
+        #     for l in xrange(len(label)):
+        #         with open('test{0}_{1}.txt'.format(i,l),'w') as f:
+        #             for k in range(pt_num):
+        #                 f.write('{0} {1} {2}\n'.format(data[l][k,0,0],data[l][k,1,0],data[l][k,2,0]))
+        # i+=1
+        # break
+        # pass
+        t1=time.time()
+        dist=PointSample.getPointInterval(data,0.1)
+        # compute_dist(data)
+        print 'done {} s'.format(time.time()-t1)
+        # t1=time.time()
 
 
     print '{} examples per second'.format(reader.total_size/float(time.time()-begin))
 
+def test_diff():
+    pts=np.random.uniform(-1000,1000,[30,500,3,1])
+    # pts=np.array([[1,1,1],[0,0,0],[0,0,1]],dtype=np.float32)
+    pts=np.asarray(pts,dtype=np.float32)
+    # pts=np.reshape(pts,[1,3,3,1])
+    dist=PointSample.getPointInterval(pts)
 
+    # print dist
+
+    import sys
+    print sys.getrefcount(dist)
+    print dist.shape
+
+    dist2=compute_dist(pts)
+
+    print np.mean(dist-dist2)
 
 if __name__=="__main__":
     test_reader()

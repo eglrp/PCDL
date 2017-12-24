@@ -16,5 +16,10 @@ void transformToRelativePolarForm(
         std::vector<double> &relative_polar_pts
 );
 
-
 void rotatePointCloud(std::vector<double>& point_cloud);
+
+void addNoise(std::vector<double>& point_cloud,double noise_level);
+
+void normalize(std::vector<double>& point_cloud);
+
+void computeDists(std::vector<double>& point_cloud,std::vector<double>& dists);

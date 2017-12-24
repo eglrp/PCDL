@@ -99,7 +99,6 @@ def _average_gradients(tower_grads):
 
     return average_grads
 
-
 class Network:
 
     def _declare_parameter(self, weight_shape, index, name='mlp',bn=False):
@@ -129,6 +128,8 @@ class Network:
             mlp = tf.nn.conv2d(input, weight, (1, 1, 1, 1), 'VALID')
             mlp = tf.nn.bias_add(mlp,bias)
             mlp = activation_fn(mlp)
+            #############################
+            self.ops['{}_mlp{}'.format(tower_name,index)]=mlp
             if bn:
                 gamma=self.params['mlp{}_gamma'.format(index)]
                 beta=self.params['mlp{}_beta'.format(index)]
@@ -139,7 +140,7 @@ class Network:
                 self.bn_cache['mlp{}_batch_means'.format(index)].append(batch_mean)
                 self.bn_cache['mlp{}_batch_vars'.format(index)].append(batch_var)
 
-        self.ops['{}_mlp{}'.format(tower_name,index)]=mlp
+        #self.ops['{}_mlp{}'.format(tower_name,index)]=mlp
         return mlp
 
     def _declare_fc_layer(self,input,index,tower_name,activation_fn=tf.nn.relu,bn=False,is_training=None):
@@ -162,12 +163,12 @@ class Network:
         self.ops['{}_fc{}'.format(tower_name,index)]=fc
         return fc
 
-    def _declare_pooling(self,input,feature_dim,name='pool'):
+    def _declare_pooling(self,input,tower_name,feature_dim,name='pool'):
         with tf.name_scope(name):
             feature_pool=tf.reduce_max(input,axis=1)
             feature_pool=tf.reshape(feature_pool,[-1,feature_dim])
 
-        self.ops[name]=feature_pool
+        self.ops['{}_{}'.format(tower_name,name)]=feature_pool
         return feature_pool
 
     def _renew_running_mean_var(self, attached_op, bn_decay):
@@ -191,14 +192,14 @@ class Network:
                     tf.summary.scalar(name+'_var_tower1',tf.reduce_mean(self.bn_cache['{}_batch_vars'.format(name)][0]))
         return tf.group(op_list)
 
-    def _inference(self,input,tower_name,is_training=None):
+    def inference(self, input, tower_name, is_training=None):
         mlp1=self._declare_mlp_layer(input,1,tower_name,bn=self.bn,is_training=is_training)
         mlp2=self._declare_mlp_layer(mlp1,2,tower_name,bn=self.bn,is_training=is_training)
         mlp3=self._declare_mlp_layer(mlp2,3,tower_name,bn=self.bn,is_training=is_training)
         mlp4=self._declare_mlp_layer(mlp3,4,tower_name,bn=self.bn,is_training=is_training)
         mlp5=self._declare_mlp_layer(mlp4,5,tower_name,bn=self.bn,is_training=is_training)
 
-        feature_pool=self._declare_pooling(mlp5,self.final_dim)
+        feature_pool=self._declare_pooling(mlp5,tower_name,self.final_dim)
         feature_pool=tf.cond(is_training,
                              lambda: tf.nn.dropout(feature_pool,0.7),
                              lambda: feature_pool)
@@ -260,7 +261,7 @@ class Network:
                 with tf.device('/gpu:{}'.format(i)):
                     tower_name='tower_{}'.format(i)
                     with tf.name_scope(tower_name):
-                        logits=self._inference(inputs[i],tower_name,is_training)
+                        logits=self.inference(inputs[i], tower_name, is_training)
                         losses=_cross_entropy_loss(logits,labels[i])
                         gradients=opt.compute_gradients(losses)
 

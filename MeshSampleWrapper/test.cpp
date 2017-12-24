@@ -105,7 +105,14 @@ int main()
     vector<double> point_cloud;
     sampleMeshPoints(vertexes,faces,areas,total_area,10240,point_cloud);
 
+    //normalize
+    normalize(point_cloud);
+    //rotated point cloud
     rotatePointCloud(point_cloud);
+    //add noise
+    addNoise(point_cloud,1e-2);
+    //normalize
+    normalize(point_cloud);
 
     writePointCloud("test.txt",point_cloud);
 

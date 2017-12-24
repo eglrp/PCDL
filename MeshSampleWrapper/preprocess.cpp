@@ -83,3 +83,78 @@ void rotatePointCloud(std::vector<double>& point_cloud)
         point_cloud[i*3+1]=y;
     }
 }
+
+
+void addNoise(std::vector<double>& point_cloud,double noise_level)
+{
+    std::random_device rd;
+    std::normal_distribution<double> dis(0.0,noise_level);
+    std::default_random_engine gen(rd());
+    for(auto it=point_cloud.begin();it!=point_cloud.end();it++)
+    {
+        (*it)+=dis(gen);
+    }
+}
+
+void normalize(std::vector<double>& point_cloud)
+{
+    double min_x=point_cloud[0],max_x=point_cloud[0],
+            min_y=point_cloud[1],max_y=point_cloud[1],
+            min_z=point_cloud[2],max_z=point_cloud[2];
+    for(size_t i=1;i<point_cloud.size()/3;i++)
+    {
+        double x0=point_cloud[i*3];
+        double y0=point_cloud[i*3+1];
+        double z0=point_cloud[i*3+2];
+        min_x=std::min(x0,min_x);
+        min_y=std::min(y0,min_y);
+        min_z=std::min(z0,min_z);
+        max_x=std::max(x0,max_x);
+        max_y=std::max(y0,max_y);
+        max_z=std::max(z0,max_z);
+    }
+
+    double center_x=(min_x+max_x)/2.0;
+    double center_y=(min_y+max_y)/2.0;
+    double center_z=(min_z+max_z)/2.0;
+    double max_dist=0;
+    for(size_t i=0;i<point_cloud.size()/3;i++)
+    {
+        point_cloud[i*3]-=center_x;
+        point_cloud[i*3+1]-=center_y;
+        point_cloud[i*3+2]-=center_z;
+        max_dist=std::max(max_dist,point_cloud[i*3]*point_cloud[i*3]+
+                                   point_cloud[i*3+1]*point_cloud[i*3+1]+
+                                   point_cloud[i*3+2]*point_cloud[i*3+2]);
+    }
+    max_dist=sqrt(max_dist);
+    for(auto it=point_cloud.begin();it!=point_cloud.end();it++)
+    {
+        (*it)/=max_dist;
+    }
+}
+
+
+void computeDists(std::vector<double>& point_cloud,std::vector<double>& dists)
+{
+    size_t pt_num=point_cloud.size()/3;
+    dists.resize(pt_num*pt_num);
+    for(size_t i=0;i<pt_num;i++)
+    {
+        dists[i*pt_num+i]=0;
+        double x0=point_cloud[i*3];
+        double y0=point_cloud[i*3+1];
+        double z0=point_cloud[i*3+2];
+        for(size_t j=i+1;j<pt_num;j++)
+        {
+            double x1=point_cloud[j*3];
+            double y1=point_cloud[j*3+1];
+            double z1=point_cloud[j*3+2];
+
+            double dist=std::sqrt((x1-x0)*(x1-x0)+(y1-y0)*(y1-y0)+(z1-z0)*(z1-z0));
+
+            dists[i*pt_num+j]=dist;
+            dists[j*pt_num+i]=dist;
+        }
+    }
+}

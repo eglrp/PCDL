@@ -8,3 +8,4 @@ VanillaPointNet/model
 .*
 *.pyc
 cmake-*
+*.txt
