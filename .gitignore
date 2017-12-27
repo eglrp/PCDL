@@ -9,3 +9,5 @@ VanillaPointNet/model
 *.pyc
 cmake-*
 *.txt
+*.so
+build/

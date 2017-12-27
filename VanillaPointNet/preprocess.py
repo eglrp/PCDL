@@ -31,6 +31,16 @@ def normalize(pcs):
     return pcs
 
 
+def exchange_dims_zy(pcs):
+    #pcs [n,k,3]
+    exchanged_data = np.empty(pcs.shape, dtype=np.float32)
+
+    exchanged_data[:,:,0]=pcs[:,:,0]
+    exchanged_data[:,:,1]=pcs[:,:,2]
+    exchanged_data[:,:,2]=pcs[:,:,1]
+    return exchanged_data
+
+
 def rotate(pcs):
     '''
     :param pcs: [n,k,3]
@@ -49,26 +59,64 @@ def rotate(pcs):
     return rotated_data
 
 
-def compute_dist(pcs):
+def compute_group(pcs):
+    def func(coord):
+        if coord[0]>0:
+            if coord[1]>0:
+                if coord[2]>0:
+                    return 0
+                else:
+                    return 1
+            else:
+                if coord[2]>0:
+                    return 2
+                else:
+                    return 3
+        else:
+            if coord[1]>0:
+                if coord[2]>0:
+                    return 4
+                else:
+                    return 5
+            else:
+                if coord[2]>0:
+                    return 6
+                else:
+                    return 7
+
+    indices=np.empty([pcs.shape[0],pcs.shape[1]],dtype=np.int64)
+    for i in range(pcs.shape[0]):
+        indices[i,:]=np.apply_along_axis(func,1,pcs[i,:])
+    return indices
+
+
+def renormalize(pcs,indices,patch_num):
     '''
-    :param pcs:
+    :param pcs: n k 3
+    :param indices:  n k
     :return:
     '''
-    eps=1e-8
-    dists=np.empty([pcs.shape[0],pcs.shape[1],pcs.shape[1],1])
-    for i in xrange(pcs.shape[0]):
-        pc=pcs[i]
-        dist=np.sum((np.repeat(pc[:,None,:],pcs.shape[1],axis=1)-
-                    np.repeat(pc[None,:,:],pcs.shape[1],axis=0))**2,axis=2)
-        # print dist.shape
-        dists[i,:,:,:]=np.sqrt(dist+eps)
+    rearranged_indices=np.empty_like(indices)
+    renormalized_pts=np.empty_like(pcs)
+    for b in range(pcs.shape[0]):
+        filled_index=0
+        for i in range(patch_num):
+            mask=indices[b,:]==i
+            if(np.sum(mask)==0):
+                continue
+            patch_pts=np.copy(pcs[b][mask])
+            patch_pts-=(np.min(patch_pts,axis=0,keepdims=True)+np.max(patch_pts,axis=0,keepdims=True))/2.0
+            dist=patch_pts[:,0]**2+patch_pts[:,1]**2+patch_pts[:,2]**2
+            max_dist=np.sqrt(np.max(dist))
+            patch_pts/=max_dist+1e-6
+            rearranged_indices[b,filled_index:filled_index+patch_pts.shape[0]]=i
+            renormalized_pts[b,filled_index:filled_index+patch_pts.shape[0]]=patch_pts
+            filled_index+=patch_pts.shape[0]
 
-    dists=np.reshape(dists,[pcs.shape[0],pcs.shape[1],pcs.shape[1]])
+    return rearranged_indices,renormalized_pts
 
-    return dists
 
 class ModelBatchReader:
-
     def __init__(self,batch_files,batch_size,thread_num,pt_num,input_dims,model='train',
                  read_func=PointSample.getPointCloudRelativePolarForm,aug_func=None):
         self.example_list = []
@@ -139,7 +187,34 @@ class ModelBatchReader:
 
         self.cur_pos+=self.batch_size
 
-        return np.expand_dims(np.asarray(inputs),axis=3),np.asarray(labels)
+        return np.asarray(inputs),np.asarray(labels)
+
+import h5py
+class H5Reader:
+    def __init__(self,file_list,):
+        data=[]
+        label=[]
+        for f in file_list:
+            h5f=h5py.File(f)
+            data.append(h5f['data'][:])
+            label.append(h5f['label'][:])
+
+        self.data=np.concatenate(data,axis=0)
+        self.data = exchange_dims_zy(self.data)
+        self.label=np.concatenate(label,axis=0)
+        self.total_size=self.label.shape[0]
+        self.cur_pos=0
+
+        
+
+
+
+
+    def __iter__(self):
+        return self
+
+    def next(self):
+        pass
 
 
 def test_reader():
@@ -165,39 +240,50 @@ def test_reader():
 
     i=0
     for data,label in reader:
+        t1=time.time()
+        indices=compute_group(data)
+        print 'half {} s'.format(time.time()-t1)
+        renormalized_indices,renormalized_data=renormalize(data,indices,8)
+        print 'done {} s'.format(time.time()-t1)
         # if random.random()<1.0:
         #     for l in xrange(len(label)):
-        #         with open('test{0}_{1}.txt'.format(i,l),'w') as f:
-        #             for k in range(pt_num):
-        #                 f.write('{0} {1} {2}\n'.format(data[l][k,0,0],data[l][k,1,0],data[l][k,2,0]))
-        # i+=1
+        #         for p in xrange(8):
+        #             with open('test_part_{0}_{1}_{2}.txt'.format(i,l,p),'w') as f:
+        #                 for pt in renormalized_data[l][renormalized_indices[l]==p]:
+        #                     f.write('{} {} {}\n'.format(pt[0],pt[1],pt[2]))
+        #
+        #         with open('test_part_{0}_{1}.txt'.format(i, l), 'w') as f:
+        #             for pt in data[l]:
+        #                 f.write('{} {} {}\n'.format(pt[0], pt[1], pt[2]))
         # break
-        # pass
-        t1=time.time()
-        dist=PointSample.getPointInterval(data,0.1)
-        # compute_dist(data)
-        print 'done {} s'.format(time.time()-t1)
-        # t1=time.time()
 
 
     print '{} examples per second'.format(reader.total_size/float(time.time()-begin))
 
-def test_diff():
-    pts=np.random.uniform(-1000,1000,[30,500,3,1])
+
+def test_group():
     # pts=np.array([[1,1,1],[0,0,0],[0,0,1]],dtype=np.float32)
-    pts=np.asarray(pts,dtype=np.float32)
     # pts=np.reshape(pts,[1,3,3,1])
-    dist=PointSample.getPointInterval(pts)
+    pts=np.random.uniform(-1000,1000,[30,500,3])
 
-    # print dist
+    indices=compute_group(pts)
+    renormalize(pts,indices,8)
 
-    import sys
-    print sys.getrefcount(dist)
-    print dist.shape
+    color=np.random.uniform(0,1,[8,3])*255
+    color=color.astype(np.int)
 
-    dist2=compute_dist(pts)
+    pt_index=np.random.randint(0,30,1)
+    coords=pts[pt_index,:,:]
+    print indices.shape
+    print coords[0].shape
 
-    print np.mean(dist-dist2)
+    with open('test.txt','w') as f:
+        for index,pt in enumerate(coords[0]):
+            f.write('{} {} {} {} {} {}\n'.format(pt[0],pt[1],pt[2],
+                                                 color[int(indices[pt_index,index]), 0],
+                                                 color[int(indices[pt_index,index]), 1],
+                                                 color[int(indices[pt_index,index]), 2]))
+
 
 if __name__=="__main__":
     test_reader()
@@ -265,3 +351,40 @@ def test_transform():
     for _ in range(5):
         polar_transform(np.random.uniform(-1,1,[20,2048,3]))
     print 'cost {}s'.format(time.time()-begin)
+
+
+def compute_dist(pcs):
+    '''
+    :param pcs:
+    :return:
+    '''
+    eps=1e-8
+    dists=np.empty([pcs.shape[0],pcs.shape[1],pcs.shape[1],1])
+    for i in xrange(pcs.shape[0]):
+        pc=pcs[i]
+        dist=np.sum((np.repeat(pc[:,None,:],pcs.shape[1],axis=1)-
+                    np.repeat(pc[None,:,:],pcs.shape[1],axis=0))**2,axis=2)
+        # print dist.shape
+        dists[i,:,:,:]=np.sqrt(dist+eps)
+
+    dists=np.reshape(dists,[pcs.shape[0],pcs.shape[1],pcs.shape[1]])
+
+    return dists
+
+
+def test_diff():
+    pts=np.random.uniform(-1000,1000,[30,500,3,1])
+    # pts=np.array([[1,1,1],[0,0,0],[0,0,1]],dtype=np.float32)
+    pts=np.asarray(pts,dtype=np.float32)
+    # pts=np.reshape(pts,[1,3,3,1])
+    dist=PointSample.getPointInterval(pts)
+
+    # print dist
+
+    import sys
+    print sys.getrefcount(dist)
+    print dist.shape
+
+    dist2=compute_dist(pts)
+
+    print np.mean(dist-dist2)

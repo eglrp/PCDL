@@ -1,9 +1,47 @@
 import tensorflow as tf
-from network_class import Network
-from preprocess import ModelBatchReader,add_noise,normalize,rotate
+from network_class import Network,leaky_relu
+from preprocess import ModelBatchReader,add_noise,normalize,rotate,exchange_dims_zy
 import PointSample
 import numpy as np
 import matplotlib.pyplot as plt
+
+import itertools
+
+from sklearn.metrics import confusion_matrix
+
+def plot_confusion_matrix(cm, classes,
+                          normalize=False,
+                          title='Confusion matrix',
+                          cmap=plt.cm.Blues):
+    """
+    This function prints and plots the confusion matrix.
+    Normalization can be applied by setting `normalize=True`.
+    """
+    if normalize:
+        cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+        print("Normalized confusion matrix")
+    else:
+        print('Confusion matrix, without normalization')
+
+    print(cm)
+
+    plt.imshow(cm, interpolation='nearest', cmap=cmap)
+    plt.title(title)
+    plt.colorbar()
+    tick_marks = np.arange(len(classes))
+    plt.xticks(tick_marks, classes, rotation=45)
+    plt.yticks(tick_marks, classes)
+
+    fmt = '.2f' if normalize else 'd'
+    thresh = cm.max() / 2.
+    for i, j in itertools.product(range(cm.shape[0]), range(cm.shape[1])):
+        plt.text(j, i, format(cm[i, j], fmt),
+                 horizontalalignment="center",
+                 color="white" if cm[i, j] > thresh else "black")
+
+    plt.tight_layout()
+    plt.ylabel('True label')
+    plt.xlabel('Predicted label')
 
 
 def assign_points_to_keypoints(pts,kpts):
@@ -201,5 +239,205 @@ def show_activation():
 
     print 'dead node num {}'.format(dead_unit_num)
 
+def read_category_file(file_name,num_class=40):
+    maps={}
+    names=[None for _ in xrange(num_class)]
+    with open(file_name,'r') as f:
+        for line in f.readlines():
+            maps[line.split(' ')[0]]=int(line.split(' ')[1])
+
+    for key,val in maps.items():
+        names[val]=key
+
+    return maps,names
+
+def test_model():
+    _,names=read_category_file('data/ModelNet40/CategoryIDs')
+    model_path='model/1024_leaky_relu/epoch499.ckpt'
+    net=Network(3,40,True,1024)
+    input=tf.placeholder(dtype=tf.float32,shape=[None,None,3,1],name='point_cloud')
+    is_training=tf.placeholder(dtype=tf.bool,shape=[],name='is_training')
+
+    net.inference(input,'cpu',is_training,leaky_relu)
+    score_layer=net.ops['cpu_fc3']
+
+    config=tf.ConfigProto()
+    config.allow_soft_placement = True
+    config.log_device_placement = False
+    sess=tf.Session(config=config)
+    saver=tf.train.Saver()
+    saver.restore(sess,model_path)
+
+    batch_files=['data/ModelNet40/test0.batch']
+    batch_size=30
+    reader=ModelBatchReader(batch_files,batch_size,4,2048,3,'test',PointSample.getPointCloud,normalize)
+    correct_num=0
+    error_num=0
+    all_labels=[]
+    all_preds=[]
+    # reader.cur_pos=1000
+    for data,label in reader:
+        scores=sess.run(score_layer,feed_dict={input:data,is_training:False})
+        preds=np.argmax(scores,axis=1)
+        all_labels.append(label)
+        all_preds.append(preds)
+        correct_num+=np.sum(preds==label)
+        # for i in xrange(data.shape[0]):
+        #     if preds[i]==label[i]:
+        #         continue
+        #
+        #     with open('misclassified/{}_{}_{}_{:.3}_{:.3}.txt'.format(
+        #             names[label[i]],names[preds[i]],
+        #             error_num,
+        #             scores[i,preds[i]],scores[i,label[i]]),'w') as f:
+        #         for pt in data[i,:,:,0]:
+        #             f.write('{} {} {}\n'.format(pt[0],pt[1],pt[2]))
+        #
+        #     error_num+=1
+
+    print 'accuracy {}'.format(correct_num/float(reader.total_size))
+
+    cnf_matrix = confusion_matrix(np.concatenate(all_labels,axis=0), np.concatenate(all_preds,axis=0),labels=range(40))
+    plt.figure()
+    plot_confusion_matrix(cnf_matrix,names)
+    plt.show()
+
+
+def read_pointnet_sample_category_file(file_name):
+    names=[]
+    with open(file_name,'r') as f:
+        for line in f.readlines():
+            if line=="":
+                break
+            names.append(line[:-1])
+
+    print names
+    return names
+
+def map_provided_label_to_batch_label(batch_names,provided_names):
+    batch_map={name:index for index,name in enumerate(batch_names)}
+    provided_map={index:name for index,name in enumerate(provided_names)}
+
+    index_map={key:batch_map[val] for key,val in provided_map.items()}
+
+    return index_map
+
+import h5py
+import math
+def test_model_pointnet_sample_version():
+    data=[]
+    label=[]
+    for i in range(2):
+        f=h5py.File('/home/pal/data/ModelNet40PointNetSampleVersion/modelnet40_ply_hdf5_2048/ply_data_test{}.h5'.format(i))
+        data.append(f['data'][:])
+        label.append(f['label'][:])
+        print data[i].shape
+        print label[i].shape
+
+    data=np.concatenate(data,axis=0)
+    label=np.concatenate(label,axis=0)
+    label=label[:,0]
+    print data.shape,label.shape
+
+    _,batch_names=read_category_file('data/ModelNet40/CategoryIDs')
+    provided_names=read_pointnet_sample_category_file('/home/pal/data/ModelNet40PointNetSampleVersion/modelnet40_ply_hdf5_2048/shape_names.txt')
+    index_map=map_provided_label_to_batch_label(batch_names,provided_names)
+
+    rectify_label=np.empty_like(label)
+    for index,l in enumerate(label):
+        rectify_label[index]=index_map[l]
+    label=rectify_label
+
+    model_path='/home/pal/model/1024_leaky_relu/epoch499.ckpt'
+    net=Network(3,40,True,1024)
+    input=tf.placeholder(dtype=tf.float32,shape=[None,None,3,1],name='point_cloud')
+    is_training=tf.placeholder(dtype=tf.bool,shape=[],name='is_training')
+
+    net.inference(input,'cpu',is_training,leaky_relu)
+    score_layer=net.ops['cpu_fc3']
+
+    config=tf.ConfigProto()
+    config.allow_soft_placement = True
+    config.log_device_placement = False
+    sess=tf.Session(config=config)
+    saver=tf.train.Saver()
+    saver.restore(sess,model_path)
+
+    batch_size=30
+    iter_num=int(math.ceil(data.shape[0]/float(batch_size)))
+
+    correct_num=0
+    all_labels=[]
+    all_preds=[]
+    for batch_index in xrange(iter_num):
+        begin_index=batch_size*batch_index
+        end_index=min((batch_index+1)*batch_size,data.shape[0])
+        batch_label=label[begin_index:end_index]
+        batch_data=data[begin_index:end_index]
+        batch_data=normalize(batch_data)
+        batch_data=exchange_dims_zy(batch_data)
+        batch_data=np.expand_dims(batch_data,axis=3)
+
+        scores=sess.run(score_layer,feed_dict={input:batch_data,is_training:False})
+        preds=np.argmax(scores,axis=1)
+        all_labels.append(batch_label)
+        all_preds.append(preds)
+        correct_num+=np.sum(preds==batch_label)
+        # for i in xrange(data.shape[0]):
+        #     if preds[i]==label[i]:
+        #         continue
+        #
+        #     with open('misclassified/{}_{}_{}_{:.3}_{:.3}.txt'.format(
+        #             names[label[i]],names[preds[i]],
+        #             error_num,
+        #             scores[i,preds[i]],scores[i,label[i]]),'w') as f:
+        #         for pt in data[i,:,:,0]:
+        #             f.write('{} {} {}\n'.format(pt[0],pt[1],pt[2]))
+        #
+        #     error_num+=1
+        # print batch_names[batch_label[0]]
+        # with open('test.txt','w') as f:
+        #     for pt in batch_data[0,:,:,0]:
+        #         f.write('{} {} {}\n'.format(pt[0],pt[1],pt[2]))
+
+    print 'accuracy {}'.format(correct_num/float(data.shape[0]))
+
+    cnf_matrix = confusion_matrix(np.concatenate(all_labels,axis=0), np.concatenate(all_preds,axis=0),labels=range(40))
+    plt.figure()
+    plot_confusion_matrix(cnf_matrix,batch_names)
+    plt.show()
+
+
+
+def draw_pointnet_sample_version():
+    # f=h5py.File('/home/pal/data/ModelNet40PointNetSampleVersion/modelnet40_ply_hdf5_2048/ply_data_test0.h5')
+    data=[]
+    label=[]
+    for i in range(5):
+        f=h5py.File('/home/pal/data/ModelNet40PointNetSampleVersion/modelnet40_ply_hdf5_2048/ply_data_train{}.h5'.format(i))
+        data.append(f['data'][:])
+        label.append(f['label'][:])
+
+    data=np.concatenate(data,axis=0)
+    print data.shape
+
+    index=np.random.randint(0,2048,1)
+
+    with open('test.txt','w') as f:
+        for pt in data[int(index),:,:]:
+            f.write('{} {} {}\n'.format(pt[0],pt[1],pt[2]))
+
+
+    # batch_files=['data/ModelNet40/train0.batch',
+    #              'data/ModelNet40/train1.batch',
+    #              'data/ModelNet40/train2.batch',
+    #              'data/ModelNet40/train3.batch']
+    # batch_size=5
+    # reader=ModelBatchReader(batch_files,batch_size,4,2048,3,'test',PointSample.getPointCloud,normalize)
+    #
+    # print reader.total_size
+
+
+
 if __name__=="__main__":
-    show_activation()
+    test_model_pointnet_sample_version()
