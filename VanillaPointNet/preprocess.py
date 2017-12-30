@@ -87,7 +87,18 @@ def compute_group(pcs):
     indices=np.empty([pcs.shape[0],pcs.shape[1]],dtype=np.int64)
     for i in range(pcs.shape[0]):
         indices[i,:]=np.apply_along_axis(func,1,pcs[i,:])
-    return indices
+
+    centers=np.empty([8,3])
+    centers[0]=np.array([0.5,0.5,0.5])
+    centers[1]=np.array([0.5,0.5,-0.5])
+    centers[2]=np.array([0.5,-0.5,0.5])
+    centers[3]=np.array([0.5,-0.5,-0.5])
+    centers[4]=np.array([-0.5,0.5,0.5])
+    centers[5]=np.array([0.5,0.5,-0.5])
+    centers[6]=np.array([0.5,-0.5,0.5])
+    centers[7]=np.array([0.5,-0.5,-0.5])
+
+    return indices,centers
 
 
 def renormalize(pcs,indices,patch_num):
@@ -114,6 +125,40 @@ def renormalize(pcs,indices,patch_num):
             filled_index+=patch_pts.shape[0]
 
     return rearranged_indices,renormalized_pts
+
+
+def local_normalized_append(pcs, indices, patch_num):
+    normalized_pcs=np.empty_like(pcs)
+    for b in range(pcs.shape[0]):
+        for i in range(patch_num):
+            mask=indices[b,:]==i
+            if(np.sum(mask)==0):
+                continue
+            patch_pts=np.copy(pcs[b][mask])
+            patch_pts-=(np.min(patch_pts,axis=0,keepdims=True)+np.max(patch_pts,axis=0,keepdims=True))/2.0
+            dist=patch_pts[:,0]**2+patch_pts[:,1]**2+patch_pts[:,2]**2
+            max_dist=np.sqrt(np.max(dist))
+            patch_pts/=max_dist+1e-6
+            normalized_pcs[b][mask]=patch_pts
+
+    return np.concatenate([pcs,normalized_pcs],axis=2)
+
+
+def local_normalized_append_with_center(pcs, indices, patch_num, centers):
+    normalized_pcs=np.empty_like(pcs)
+    for b in range(pcs.shape[0]):
+        for i in range(patch_num):
+            mask=indices[b,:]==i
+            if(np.sum(mask)==0):
+                continue
+            patch_pts=np.copy(pcs[b][mask])
+            patch_pts-=np.expand_dims(centers[i],0)
+            dist=patch_pts[:,0]**2+patch_pts[:,1]**2+patch_pts[:,2]**2
+            max_dist=np.sqrt(np.max(dist))
+            patch_pts/=max_dist+1e-6
+            normalized_pcs[b][mask]=patch_pts
+
+    return np.concatenate([pcs,normalized_pcs],axis=2)
 
 
 class ModelBatchReader:
@@ -190,8 +235,8 @@ class ModelBatchReader:
         return np.asarray(inputs),np.asarray(labels)
 
 import h5py
-class H5Reader:
-    def __init__(self,file_list,):
+class H5ReaderAll:
+    def __init__(self,file_list,batch_size,aug_func=None,model='train'):
         data=[]
         label=[]
         for f in file_list:
@@ -204,19 +249,93 @@ class H5Reader:
         self.label=np.concatenate(label,axis=0)
         self.total_size=self.label.shape[0]
         self.cur_pos=0
+        self.indices=list(np.arange(0,self.data.shape[0]))
+        self.model=model
+        self.batch_size=batch_size
+        self.aug_func=aug_func
 
-        
-
-
-
+        if self.model=='train':
+            random.shuffle(self.indices)
 
     def __iter__(self):
         return self
 
     def next(self):
-        pass
+        if self.cur_pos>=self.total_size:
+            if self.model=='train':
+                random.shuffle(self.indices)
+            self.cur_pos=0
+            raise StopIteration
 
+        cur_read_size=min(self.total_size-self.cur_pos,self.batch_size)
+        cur_batch_indices=[]
+        cur_batch_indices+=self.indices[self.cur_pos:self.cur_pos+cur_read_size]
 
+        if self.model=='train':
+            cur_sample_size=self.batch_size-cur_read_size
+            if cur_sample_size>0:
+                sample_list=np.random.randint(0,self.total_size,cur_sample_size)
+                cur_batch_indices+=list(sample_list)
+
+        batch_label=self.label[cur_batch_indices]
+        batch_data=self.data[cur_batch_indices]
+        if self.aug_func is not None:
+            batch_data=self.aug_func(batch_data)
+
+        self.cur_pos+=self.batch_size
+        return batch_data,batch_label
+
+class H5ReaderBatch:
+    def __init__(self, file_list, batch_size, aug_func=None, model='train'):
+        data = []
+        label = []
+        for f in file_list:
+            h5f = h5py.File(f)
+            data.append(h5f['data'][:])
+            label.append(h5f['label'][:])
+
+        self.data = np.concatenate(data, axis=0)
+        self.data = exchange_dims_zy(self.data)
+        self.label = np.concatenate(label, axis=0)
+        self.total_size = self.label.shape[0]
+        self.cur_pos = 0
+        self.indices = list(np.arange(0, self.data.shape[0]))
+        self.model = model
+        self.batch_size = batch_size
+        self.aug_func = aug_func
+
+        if self.model == 'train':
+            random.shuffle(self.indices)
+
+    def __iter__(self):
+        return self
+
+    def next(self):
+        if self.cur_pos >= self.total_size:
+            if self.model == 'train':
+                random.shuffle(self.indices)
+            self.cur_pos = 0
+            raise StopIteration
+
+        cur_read_size = min(self.total_size - self.cur_pos, self.batch_size)
+        cur_batch_indices = []
+        cur_batch_indices += self.indices[self.cur_pos:self.cur_pos + cur_read_size]
+
+        if self.model == 'train':
+            cur_sample_size = self.batch_size - cur_read_size
+            if cur_sample_size > 0:
+                sample_list = np.random.randint(0, self.total_size, cur_sample_size)
+                cur_batch_indices += list(sample_list)
+
+        batch_label = self.label[cur_batch_indices]
+        batch_data = self.data[cur_batch_indices]
+        if self.aug_func is not None:
+            batch_data = self.aug_func(batch_data)
+
+        self.cur_pos += self.batch_size
+        return batch_data, batch_label
+
+#################test code below##################
 def test_reader():
     batch_files=['data/ModelNet40/test0.batch']
     batch_size=30
@@ -257,8 +376,65 @@ def test_reader():
         #                 f.write('{} {} {}\n'.format(pt[0], pt[1], pt[2]))
         # break
 
-
     print '{} examples per second'.format(reader.total_size/float(time.time()-begin))
+
+
+def test_h5_reader():
+    file_list=[
+        "data/Stanford3dDataset_v1.2_Aligned_Version_sem_seg_hdf5_data/ply_data_all_{}.h5".format(index) for index in xrange(24)
+        # "data/ModelNet40PointNetSampleVersion/modelnet40_ply_hdf5_2048/ply_data_train{}.h5".format(index) for index in xrange(5)
+    ]
+
+    # def aug_func(pcs):
+    #     begin=time.time()
+    #     indices=compute_group(pcs)
+    #     print 'cost {} s'.format(time.time()-begin)
+    #     pcs=local_normalized_append(pcs, indices, 8)
+    #     print 'cost {} s'.format(time.time()-begin)
+    #     return pcs
+
+    reader=H5ReaderAll(file_list, 30, None, 'test')
+    print reader.data.shape
+
+    # def save_h5(h5_filename, data, label, data_dtype='float32', label_dtype='uint8'):
+    #     h5_fout = h5py.File(h5_filename)
+    #     h5_fout.create_dataset(
+    #         'data', data=data,
+    #         compression='gzip', compression_opts=4,
+    #         dtype=data_dtype)
+    #     h5_fout.create_dataset(
+    #         'label', data=label,
+    #         compression='gzip', compression_opts=1,
+    #         dtype=label_dtype)
+    #     h5_fout.close()
+    #
+    #
+    # save_h5('data/Stanford3dDataset_v1.2_Aligned_Version_sem_seg_hdf5_data/train.h5',reader.data[:20291],reader.label[:20291])
+    # save_h5('data/Stanford3dDataset_v1.2_Aligned_Version_sem_seg_hdf5_data/test.h5',reader.data[20291:],reader.label[20291:])
+
+    print np.min(reader.label)
+    print np.max(reader.label)
+    import matplotlib.pyplot as plt
+    plt.hist(reader.label.flat(),20)
+    plt.show()
+
+    # test group and normalized_append
+    # i=0
+    # for data,label in reader:
+    #     if random.random()<0.1:
+    #         indices,centers=compute_group(data)
+    #         data=local_normalized_append_with_center(data, indices, 8,centers)
+    #         i+=1
+    #         with open('test{}.txt'.format(i),'w') as f:
+    #             for pt,index in zip(data[0],indices[0]):
+    #                 if index==0:
+    #                     color=(pt[2]/np.max(data[0,:,2])*np.array([255,0,0],dtype=np.float32)).astype(np.int32)
+    #                     f.write('{} {} {} {} {} {}\n'.format(pt[3],pt[4],pt[5],color[0],color[1],color[2]))
+    #         with open('testo{}.txt'.format(i),'w') as f:
+    #             for pt,index in zip(data[0],indices[0]):
+    #                 if index==0:
+    #                     color=(pt[2]/np.max(data[0,:,2])*np.array([255,0,0],dtype=np.float32)).astype(np.int32)
+    #                     f.write('{} {} {} {} {} {}\n'.format(pt[0],pt[1],pt[2],color[0],color[1],color[2]))
 
 
 def test_group():
@@ -286,7 +462,7 @@ def test_group():
 
 
 if __name__=="__main__":
-    test_reader()
+    test_h5_reader()
 
 
 # deprecated below due to efficiency

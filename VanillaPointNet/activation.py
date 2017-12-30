@@ -1,5 +1,5 @@
 import tensorflow as tf
-from network_class import Network,leaky_relu
+from cls_network import Network,leaky_relu
 from preprocess import ModelBatchReader,add_noise,normalize,rotate,exchange_dims_zy
 import PointSample
 import numpy as np
