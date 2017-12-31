@@ -116,7 +116,6 @@ def test_backward_forwad_numeric():
         #     print '{} {} {} diff {:.8} val {}'.format(x,argmax_indices[x,y],y,diff,feats_grads_val[x,argmax_indices[x,y],y])
         #     assert abs(diff)<1e-5
 
-
 def test_backward():
     grad_module=tf.load_op_library("./cmake-build-debug/libIndicesPoolGrad.so")
     pts=np.array([[1,2,3],[3,2,1],[1,3,5]],dtype=np.float32)

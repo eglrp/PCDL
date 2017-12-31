@@ -44,14 +44,14 @@ def read_room_h5(room_h5_file):
     f=h5py.File(room_h5_file,'r')
     return f['data'][:],f['label'][:]
 
-def read_room_context(room_context_file):
-    with open(room_context_file,'r') as f:
+def read_room_context(room_context_file,model='rb'):
+    with open(room_context_file,model) as f:
         block_list,room_downsample=cPickle.load(f)
     return block_list,room_downsample
 
-def save_pkl(obj,filename):
-    with open(filename,'w') as f:
-        cPickle.dump(obj,f)
+def save_pkl(obj,filename,model='wb',protocol=2):
+    with open(filename,model) as f:
+        cPickle.dump(obj,f,protocol)
 
 def sample_data(data, num_sample):
     """ data is in N x ...
@@ -343,7 +343,6 @@ def merge_local_feats_context(file_stem,output_dir,feats_dir,context_dir):
 
     save_pkl([block_list,room_downsample],output_dir+file_stem+".pkl")
 
-
 def test_fpfh_kmeans():
     feats=read_feats('268_Area_6_office_8.feats')
 
@@ -441,12 +440,34 @@ def test_downsample():
         for pt in downsample_data:
             f.write('{} {} {} {} {} {}\n'.format(pt[0],pt[1],pt[2],pt[3],pt[4],pt[5]))
 
+def normalize(pts):
+    pts-=(np.max(pts,axis=0,keepdims=True)+np.min(pts,axis=0,keepdims=True))/2.0
+    dist=pts[:,0]**2+pts[:,1]**2+pts[:,2]**2
+    max_dist=np.sqrt(np.max(dist,axis=0,keepdims=True))
+    pts/=max_dist
+    return pts
+
 if __name__=="__main__":
+    import time
     f=open('room_stems.txt','r')
     file_stems=[line.strip('\n') for line in f.readlines()]
     f.close()
 
+    begin=time.time()
     for fs in file_stems:
-        merge_local_feats_context(fs,'../data/S3DIS/temp/','../data/S3DIS/block_feats_fpfh/',
-                                  '../data/S3DIS/room_context/')
+        block_list,global_pts=read_room_context('../data/S3DIS/room_context_fpfh/'+fs+'.pkl','rb')
+        for block in block_list:
+            block['cont'][:, :3]=normalize(block['cont'][:,:3])
+            block['cont'][:, 3:]-=128.0
+            block['cont'][:, 3:]/=128.0
+            block['feat']-=50
+            block['feat']/=50
+            # print np.max(block['feat'],axis=0),np.min(block['feat'],axis=0)
 
+        global_pts[:, :3]=normalize(global_pts[:,:3])
+        global_pts[:, 3:]-=128.0
+        global_pts[:, 3:]/=128.0
+        save_pkl((block_list,global_pts),'../data/S3DIS/train/'+fs+'.pkl')
+
+
+    print 'cost {} s'.format(time.time()-begin)

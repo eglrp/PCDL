@@ -26,3 +26,7 @@ target_link_libraries(IndicesPool ${TF_LIB}/libtensorflow_framework.so)
 add_library(IndicesPoolGrad SHARED IndicesPoolGrad.cc)
 target_include_directories(IndicesPoolGrad PUBLIC PUBLIC ${TF_INCLUDE} ${TF_INCLUDE}/external/nsync/public)
 target_link_libraries(IndicesPoolGrad ${TF_LIB}/libtensorflow_framework.so)
+
+add_library(GlobalIndicesPool SHARED GlobalIndicesPool.cc)
+target_include_directories(IndicesPoolGrad PUBLIC PUBLIC ${TF_INCLUDE} ${TF_INCLUDE}/external/nsync/public)
+target_link_libraries(IndicesPoolGrad ${TF_LIB}/libtensorflow_framework.so)

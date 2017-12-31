@@ -30,7 +30,6 @@ def normalize(pcs):
     pcs/=(np.expand_dims(max_dist,axis=2)+eps)
     return pcs
 
-
 def exchange_dims_zy(pcs):
     #pcs [n,k,3]
     exchanged_data = np.empty(pcs.shape, dtype=np.float32)
