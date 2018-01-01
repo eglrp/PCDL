@@ -2,8 +2,8 @@ import tensorflow as tf
 import numpy as np
 import indices_pool_grad
 
-indices_pool_module=tf.load_op_library("./build/libIndicesPool.so")
 
+indices_pool_module=tf.load_op_library("./build/libIndicesPool.so")
 def numpy_indices_pool(feats,indices,patch_num):
     '''
     :param feats: n k f
@@ -128,6 +128,7 @@ def test_backward():
 
     with tf.Session():
         print grad_module.indices_pool_grad(pts,indices,pool_grads,patch_num=2).eval()
+
 
 
 if __name__=="__main__":

@@ -279,6 +279,44 @@ def room2context(room_f5_file='../data/S3DIS/room/260_Area_6_office_35.h5',
 
     return block_list,room_downsample
 
+
+def room2context_without_sample(room_f5_file='../data/S3DIS/room/260_Area_6_office_35.h5',
+                                 room_downsample_interval=0.2,
+                                 block_context_downsample_interval=0.1,
+                                 block_size=2.0,
+                                 stride=1.0):
+    data,label=read_room_h5(room_f5_file)
+
+    data[:,:3]-=np.min(data[:,:3],axis=0,keepdims=True)
+    room_downsample,room_indices=points_downsample(data,room_downsample_interval)
+    block_data_list, block_label_list, block_indices_list, block_beg_list=\
+        room2blocks_with_indices(data, label, room_indices, block_size=block_size, stride=stride)
+
+    block_list=[]
+    for i in xrange(len(block_data_list)):
+        xcond= (block_data_list[i][:, 0] >= block_beg_list[i][0] + (block_size-stride)/2.0) & \
+               (block_data_list[i][:, 0] <= block_beg_list[i][0] + (block_size-stride)/2.0+1.0)
+        ycond= (block_data_list[i][:, 1] >= block_beg_list[i][1] + (block_size-stride)/2.0) & \
+               (block_data_list[i][:, 1] <= block_beg_list[i][1] + (block_size-stride)/2.0+1.0)
+        cond=xcond&ycond
+
+        # less than 100 points not considered
+        if np.sum(cond)<100:
+            continue
+        block_context_downsample, block_context_indices=points_downsample(block_data_list[i], block_context_downsample_interval)
+        block_sample_data,block_sample_indices=sample_data(block_data_list[i][cond, :],block_center_point_num)
+
+        block_dict={}
+        block_dict['data']= block_sample_data
+        block_dict['label']= block_label_list[i][cond, :][block_sample_indices]
+        block_dict['cont_index']=block_context_indices[cond][block_sample_indices]
+        block_dict['room_index']= block_indices_list[i][cond][block_sample_indices]
+        block_dict['cont']=block_context_downsample
+
+        block_list.append(block_dict)
+
+    return block_list,room_downsample
+
 def room2context_all():
     room_files=[fn for fn in glob.glob(os.path.join('../data/S3DIS/room','*.h5'))]
     for rf_i,rf in enumerate(room_files):
@@ -447,7 +485,7 @@ def normalize(pts):
     pts/=max_dist
     return pts
 
-if __name__=="__main__":
+def normalize_all():
     import time
     f=open('room_stems.txt','r')
     file_stems=[line.strip('\n') for line in f.readlines()]
@@ -471,3 +509,33 @@ if __name__=="__main__":
 
 
     print 'cost {} s'.format(time.time()-begin)
+
+def get_train_test_split():
+    import os
+    path=os.path.split(os.path.realpath(__file__))[0]
+    f=open(path+'/room_stems.txt','r')
+    file_stems=[line.strip('\n') for line in f.readlines()]
+    f.close()
+
+    f=open(path+'/room_block_nums.txt','r')
+    block_nums=[int(line.strip('\n')) for line in f.readlines()]
+    f.close()
+
+    # use area 5 as test
+    train,test=[],[]
+    train_nums,test_nums=[],[]
+    for fs,bn in zip(file_stems,block_nums):
+        if fs.split('_')[2]=='5':
+            test.append(fs)
+            test_nums.append(bn)
+        else:
+            train.append(fs)
+            train_nums.append(bn)
+
+    return train,test,train_nums,test_nums
+
+
+
+if __name__=="__main__":
+    print len(get_train_test_split()[0])
+    print len(get_train_test_split()[1])

@@ -24,9 +24,31 @@ target_link_libraries(IndicesPool ${TF_LIB}/libtensorflow_framework.so)
 
 
 add_library(IndicesPoolGrad SHARED IndicesPoolGrad.cc)
-target_include_directories(IndicesPoolGrad PUBLIC PUBLIC ${TF_INCLUDE} ${TF_INCLUDE}/external/nsync/public)
+target_include_directories(IndicesPoolGrad PUBLIC ${TF_INCLUDE} ${TF_INCLUDE}/external/nsync/public)
 target_link_libraries(IndicesPoolGrad ${TF_LIB}/libtensorflow_framework.so)
 
 add_library(GlobalIndicesPool SHARED GlobalIndicesPool.cc)
-target_include_directories(IndicesPoolGrad PUBLIC PUBLIC ${TF_INCLUDE} ${TF_INCLUDE}/external/nsync/public)
-target_link_libraries(IndicesPoolGrad ${TF_LIB}/libtensorflow_framework.so)
+target_include_directories(GlobalIndicesPool PUBLIC ${TF_INCLUDE} ${TF_INCLUDE}/external/nsync/public)
+target_link_libraries(GlobalIndicesPool ${TF_LIB}/libtensorflow_framework.so)
+
+
+add_library(GlobalIndicesPoolGrad SHARED GlobalIndicesPoolGrad.cc)
+target_include_directories(GlobalIndicesPoolGrad PUBLIC ${TF_INCLUDE} ${TF_INCLUDE}/external/nsync/public)
+target_link_libraries(GlobalIndicesPoolGrad ${TF_LIB}/libtensorflow_framework.so)
+
+
+add_library(ContextBlockPool SHARED ContextBlockPool.cc)
+target_include_directories(ContextBlockPool PUBLIC ${TF_INCLUDE} ${TF_INCLUDE}/external/nsync/public)
+target_link_libraries(ContextBlockPool ${TF_LIB}/libtensorflow_framework.so)
+
+add_library(ContextBlockPoolGrad SHARED ContextBlockPoolGrad.cc)
+target_include_directories(ContextBlockPoolGrad PUBLIC PUBLIC ${TF_INCLUDE} ${TF_INCLUDE}/external/nsync/public)
+target_link_libraries(ContextBlockPoolGrad ${TF_LIB}/libtensorflow_framework.so)
+
+add_library(ContextBatchPool SHARED ContextBatchPool.cc)
+target_include_directories(ContextBatchPool PUBLIC ${TF_INCLUDE} ${TF_INCLUDE}/external/nsync/public)
+target_link_libraries(ContextBatchPool ${TF_LIB}/libtensorflow_framework.so)
+
+add_library(ContextBatchPoolGrad SHARED ContextBatchPoolGrad.cc)
+target_include_directories(ContextBatchPoolGrad PUBLIC ${TF_INCLUDE} ${TF_INCLUDE}/external/nsync/public)
+target_link_libraries(ContextBatchPoolGrad ${TF_LIB}/libtensorflow_framework.so)

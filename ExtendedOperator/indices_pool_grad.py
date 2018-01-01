@@ -1,12 +1,6 @@
 import tensorflow as tf
 from tensorflow.python.framework import ops
-from tensorflow.python.ops import array_ops
-from tensorflow.python.ops import sparse_ops
-
 import os
-
-
-# print os.path.split(os.path.realpath(__file__))[0]
 
 grad_module=tf.load_op_library(os.path.split(os.path.realpath(__file__))[0]+"/build/libIndicesPoolGrad.so")
 

@@ -37,7 +37,7 @@ class BlockProducer(threading.Thread):
             self.reset_event.wait()
 
     def reset(self,indices):
-        self.indices=indices
+        self.file_indices=indices
         self.reset_event.set()
 
 
@@ -87,7 +87,7 @@ class BlockProvider:
         if self.model=='train':
             random.shuffle(self.block_indices)
 
-        print 'cur file pos {}'.format(self.cur_file_pos)
+        # print 'cur file pos {}'.format(self.cur_file_pos)
         self.cur_file_pos+=1
 
     def _get_batch(self):
@@ -101,20 +101,31 @@ class BlockProvider:
         labels=[np.expand_dims(self.block_list[index]['label'],0) for index in batch_indices]
         cont_block_indices=np.concatenate(cont_block_indices,axis=0).astype(np.int64)        # [batch_size,4096]
         room_indices=np.concatenate(room_indices,axis=0).astype(np.int64)
-        labels=np.squeeze(np.concatenate(labels,axis=0)).astype(np.int64)
+        labels=np.squeeze(np.concatenate(labels,axis=0),axis=2).astype(np.int64)
 
         cont_points=[self.block_list[index]['cont'] for index in batch_indices]
         cont_points=np.concatenate(cont_points,axis=0).astype(np.float32)
 
-        cont_batch_indices=[np.ones(len(self.block_list[index]['cont'])) for index in batch_indices]
-        cont_batch_indices=np.concatenate(cont_batch_indices,axis=0).astype(np.int64)
+        cont_lens=[len(self.block_list[index]['cont']) for index in batch_indices]
+        cont_batch_indices=[0 for _ in xrange(len(batch_indices))]
+        for i in xrange(1,len(batch_indices)):
+            cont_batch_indices[i]=cont_batch_indices[i-1]+cont_lens[i-1]
 
         self.cur_block_pos+=self.batch_size
 
-        feats=[np.expand_dims(self.block_list[index]['feat'],0) for index in batch_indices]
-        feats=np.squeeze(np.concatenate(feats,axis=0)).astype(np.float32)      # [batch_size,4096,33]
+        local_feats=[np.expand_dims(self.block_list[index]['feat'],0) for index in batch_indices]
+        local_feats=(np.concatenate(local_feats,axis=0)).astype(np.float32)      # [batch_size,4096,33]
 
-        return self.global_pts.astype(np.float32),room_indices,cont_points,cont_batch_indices,cont_block_indices,feats,labels
+        batch_data={}
+        batch_data['global_pts']=self.global_pts
+        batch_data['global_indices']=room_indices
+        batch_data['context_pts']=cont_points
+        batch_data['context_batch_indices']=cont_batch_indices
+        batch_data['context_block_indices']=cont_block_indices
+        batch_data['local_feats']=local_feats
+        batch_data['labels']=labels
+
+        return batch_data
 
 
     def __iter__(self):
@@ -123,10 +134,10 @@ class BlockProvider:
     def next(self):
         if self.cur_file_pos>=self.file_len and self.cur_block_pos>=self.block_len:
             self.cur_file_pos=0
+            indices=range(0,self.file_len)
             if self.model=='train':
-                self.producer.reset(random.shuffle(range(0,self.file_len)))
-            else:
-                self.producer.reset(range(0,self.file_len))
+                random.shuffle(indices)
+            self.producer.reset(indices)
 
             self._get_block()
             raise StopIteration
@@ -146,6 +157,7 @@ class BlockProviderMultiGPUWrapper:
         self.producer=BlockProvider(file_list,block_nums,batch_size,max_queue_list,model)
         self.gpu_num=gpu_num
         self.end_iter=False
+        self.total_size=self.producer.total_size
 
     def __iter__(self):
         return self
@@ -193,12 +205,13 @@ if __name__=="__main__":
 
     file_list=['data/S3DIS/train/'+fs+'.pkl' for fs in file_stems]
 
-    provider=BlockProviderMultiGPUWrapper(2,file_list,block_nums,batch_size=5,max_queue_list=5,model='test')
+    provider=BlockProviderMultiGPUWrapper(2,file_list,block_nums,batch_size=5,max_queue_list=5,model='train')
     print 'done'
 
     begin=time.time()
     for i,data in enumerate(provider):
-        print i,len(data[0][-3]),len(data[1][-3])
+        # print i,len(data[0][-3]),len(data[1][-3])
+        print data[0][-4]
         # with open('room_{}.txt'.format(i),'w') as f:
         #     for pt in data[0][0]:
         #         f.write('{} {} {} {} {} {}\n'.format(pt[0],pt[1],pt[2],
@@ -214,7 +227,7 @@ if __name__=="__main__":
         #                                            int(pt[4]*128+128),
         #                                            int(pt[5]*128+128)))
         #
-        # if i >5: break
+        if i >5: break
 
     print 'cost {} s '.format(time.time()-begin)
     provider.close()
