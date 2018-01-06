@@ -232,9 +232,6 @@ class SegmentationNetwork:
 
         feature_pool=self._declare_pooling(mlp5,tower_name) #[n,f]
         self.ops['feature_pool']=feature_pool
-        # feature_pool=tf.cond(is_training,
-        #                      lambda: tf.nn.dropout(feature_pool,0.7),
-        #                      lambda: feature_pool)
         feature_pool=tf.expand_dims(feature_pool,axis=1)
         feature_tile=tf.tile(feature_pool,[1,tf.shape(mlp5)[1],1])   # [n,k,f]
         feature_tile=tf.expand_dims(feature_tile,axis=2)
@@ -414,10 +411,10 @@ class ContextSegmentationNetwork:
                         mean_ass=tf.assign_sub(running_mean,(1-bn_decay)*
                                               (running_mean-tf.reduce_mean(tf.concat(batch_means,axis=0),axis=0)))
                     op_list+=[var_ass,mean_ass]
-                    # tf.summary.scalar(name+'_mean',tf.reduce_mean(running_mean))
-                    # tf.summary.scalar(name+'_mean_tower1',tf.reduce_mean(self.bn_cache['{}_batch_means'.format(name)][0]))
-                    # tf.summary.scalar(name+'_var',tf.reduce_mean(running_var))
-                    # tf.summary.scalar(name+'_var_tower1',tf.reduce_mean(self.bn_cache['{}_batch_vars'.format(name)][0]))
+                    tf.summary.scalar(name+'_mean',tf.reduce_mean(running_mean))
+                    tf.summary.scalar(name+'_mean_tower1',tf.reduce_mean(self.bn_cache['{}_batch_means'.format(name)][0]))
+                    tf.summary.scalar(name+'_var',tf.reduce_mean(running_var))
+                    tf.summary.scalar(name+'_var_tower1',tf.reduce_mean(self.bn_cache['{}_batch_vars'.format(name)][0]))
 
         return tf.group(*op_list)
 
@@ -463,7 +460,7 @@ class ContextSegmentationNetwork:
         global_mlp4 = self._declare_mlp_layer(global_mlp3, 4, 'global_', tower_name, active_fn, self.bn, is_training)
         global_mlp5 = self._declare_mlp_layer(global_mlp4, 5, 'global_', tower_name, active_fn, self.bn, is_training)
 
-        global_mlp5=tf.squeeze(global_mlp5)
+        global_mlp5=tf.squeeze(global_mlp5,axis=(0,2))
 
         return global_mlp5
 
@@ -477,13 +474,19 @@ class ContextSegmentationNetwork:
         context_mlp4 = self._declare_mlp_layer(context_mlp3, 4, 'context_', tower_name, active_fn, self.bn, is_training)
         context_mlp5 = self._declare_mlp_layer(context_mlp4, 5, 'context_', tower_name, active_fn, self.bn, is_training)
 
-        context_mlp5=tf.squeeze(context_mlp5)
+        context_mlp5=tf.squeeze(context_mlp5,axis=(0,2))
 
         return context_mlp5
 
     def inference(self, global_pts, global_indices, local_feats,
                   context_pts, context_batch_indices, context_block_indices,
                   tower_name, is_training, active_fn=leaky_relu):
+
+        # global_len,context_len=tf.shape(global_pts)[0],tf.shape(context_pts)[0]
+        # all_pts=tf.concat([global_pts,context_pts],axis=0)
+        # all_pts=self._global_feats(all_pts,tower_name,is_training,active_fn)
+        # global_feats,context_feats=tf.split(all_pts,[global_len,context_len],axis=0)
+
         global_feats=self._global_feats(global_pts, tower_name, is_training, active_fn)
         context_feats=self._context_feats(context_pts, tower_name, is_training, active_fn)
 
@@ -499,12 +502,16 @@ class ContextSegmentationNetwork:
         shp_feats=repeat_tensor(shp_feats,2,1,tf.shape(global_loc_feats)[1])  # b,k,2*f
         feats=tf.concat([shp_feats, global_loc_feats, context_loc_feats, local_feats],axis=2)  # b,k,4*f+local_feat_dim
 
+        self.ops['feats']=feats
+
         feats=tf.expand_dims(feats,axis=2)  # b,k,1,4*f+local_feat_dim
+
         classify_mlp1=self._declare_mlp_layer(feats,1,'classify_',tower_name,active_fn,self.bn,is_training)         # b,k,1,512
         classify_mlp2=self._declare_mlp_layer(classify_mlp1,2,'classify_',tower_name,active_fn,self.bn,is_training) # b,k,1,256
         classify_mlp3=self._declare_mlp_layer(classify_mlp2,3,'classify_',tower_name,None,False,is_training)        # b,k,1,num_classes
         classify_mlp3=tf.squeeze(classify_mlp3,axis=2)                                                              # b,k,num_classes
 
+        self.ops['inference_logits']=classify_mlp3
         return classify_mlp3
 
     def declare_train_net(self,global_pts, global_indices, local_feats,
@@ -667,7 +674,7 @@ if __name__=="__main__":
 
     is_training=tf.placeholder(tf.bool)
 
-    net=ContextSegmentationNetwork(input_dim,num_classes,True,local_feat_dim,final_dim)
+    net=ContextSegmentationNetwork(input_dim,num_classes,False,local_feat_dim,final_dim)
     net.declare_train_net(global_pts,global_indices,local_feats,
                           context_pts,context_batch_indices,context_block_indices,
                           labels,is_training,gpu_num,
@@ -720,7 +727,7 @@ if __name__=="__main__":
             feed_dict[local_feats[k]]=fixed_local_feats
             feed_dict[labels[k]]=fixed_label
 
-        feed_dict[is_training]=True
+        feed_dict[is_training]=False
 
         accuracy,logits,loss_val,_,summary_str=sess.run([net.ops['accuracy'],net.ops['logits'],
                                              net.ops['loss'],net.ops['apply_grad'],

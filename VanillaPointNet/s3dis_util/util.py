@@ -5,10 +5,13 @@ import h5py
 import math
 import cPickle
 import struct
+import FPFHExtractor
+from concurrent.futures import ProcessPoolExecutor,wait,ThreadPoolExecutor
 
-def read_class_names():
+def get_class_names():
     names=[]
-    with open('class_names.txt','r') as f:
+    path=os.path.split(os.path.realpath(__file__))[0]
+    with open(path+'/class_names.txt','r') as f:
         for line in f.readlines():
             names.append(line.strip('\n'))
 
@@ -44,10 +47,10 @@ def read_room_h5(room_h5_file):
     f=h5py.File(room_h5_file,'r')
     return f['data'][:],f['label'][:]
 
-def read_room_context(room_context_file,model='rb'):
-    with open(room_context_file,model) as f:
-        block_list,room_downsample=cPickle.load(f)
-    return block_list,room_downsample
+def read_pkl(filename, model='rb'):
+    with open(filename, model) as f:
+        obj=cPickle.load(f)
+    return obj
 
 def save_pkl(obj,filename,model='wb',protocol=2):
     with open(filename,model) as f:
@@ -192,6 +195,36 @@ def room2blocks_with_indices(data, label, indices, block_size=1.0, stride=1.0):
 
     return block_data_list,block_label_list,block_indices_list,beg_list
 
+def room2blocks_cond(data,block_size,stride,center_size):
+    limit = np.amax(data, 0)[0:3]
+
+    # Get the corner location for our sampling blocks
+    xbeg_list = []
+    ybeg_list = []
+    num_block_x = int(np.ceil(limit[0] / stride)) + 1
+    num_block_y = int(np.ceil(limit[1] / stride)) + 1
+    for i in range(num_block_x):
+        for j in range(num_block_y):
+            xbeg_list.append(i * stride-(block_size-center_size)/2.0)
+            ybeg_list.append(j * stride-(block_size-center_size)/2.0)
+
+    # Collect blocks
+    block_conds=[]
+    block_beg_list=[]
+    for idx in range(len(xbeg_list)):
+        xbeg = xbeg_list[idx]
+        ybeg = ybeg_list[idx]
+        xcond = (data[:, 0] <= xbeg + block_size) & (data[:, 0] >= xbeg)
+        ycond = (data[:, 1] <= ybeg + block_size) & (data[:, 1] >= ybeg)
+        cond = xcond & ycond
+        if np.sum(cond) < 100:  # discard block if there are less than 100 pts.
+            continue
+
+        block_beg_list.append((xbeg,ybeg))
+        block_conds.append(cond)
+
+    return block_conds,block_beg_list
+
 def points_downsample(data, sample_stride=0.1):
     min_coor=np.min(data[:,:3],axis=0,keepdims=True)
     data[:, :3]-=min_coor
@@ -232,7 +265,7 @@ def save_h5(h5_filename, data, label, data_dtype='float32', label_dtype='uint8')
 
 def save_all_room_h5():
     root_dir='../data/Stanford3dDataset_v1.2_Aligned_Version/'
-    class_names=read_class_names()
+    class_names=get_class_names()
     room_dirs=read_room_dirs()
 
     for dir_index,dir in enumerate(room_dirs):
@@ -240,91 +273,139 @@ def save_all_room_h5():
         save_h5("{}_{}.h5".format(dir_index,str(dir[:-12]).replace('/','_')),pcs,labels)
         print str(dir[:-12]).replace('/','_')
 
+def get_train_test_split():
+    import os
+    path = os.path.split(os.path.realpath(__file__))[0]
+    f = open(path + '/room_stems.txt', 'r')
+    file_stems = [line.strip('\n') for line in f.readlines()]
+    f.close()
+
+    f = open(path + '/room_block_nums.txt', 'r')
+    block_nums = [int(line.strip('\n')) for line in f.readlines()]
+    f.close()
+
+    # use area 5 as test
+    train, test = [], []
+    # train_nums, test_nums = [], []
+    for fs, bn in zip(file_stems, block_nums):
+        if fs.split('_')[2] == '5':
+            test.append(fs)
+            # test_nums.append(bn)
+        else:
+            train.append(fs)
+            # train_nums.append(bn)
+
+    return train, test #,train_nums, test_nums
+
+def get_center_cond(context_raw_pts, context_beg, context_size, center_size):
+    xcond= (context_raw_pts[:, 0] >= context_beg[0] + (context_size - center_size) / 2.0) & \
+           (context_raw_pts[:, 0] <= context_beg[0] + (context_size - center_size) / 2.0 + center_size)
+    ycond= (context_raw_pts[:, 1] >= context_beg[1] + (context_size - center_size) / 2.0) & \
+           (context_raw_pts[:, 1] <= context_beg[1] + (context_size - center_size) / 2.0 + center_size)
+    cond=xcond&ycond
+
+    return cond
+
+
 # room raw data to room context data
-def room2context(room_f5_file='../data/S3DIS/room/260_Area_6_office_35.h5',
-                 room_downsample_interval=0.2,
-                 block_context_downsample_interval=0.1,
-                 block_center_point_num=4096,
-                 block_size=2.0,
-                 stride=1.0):
-    data,label=read_room_h5(room_f5_file)
+def room2context(filename='../data/S3DIS/room/260_Area_6_office_35.h5',
+                 room_sample_interval=0.2,
+                 context_sample_interval=0.1,
+                 context_size=2.0,
+                 center_size=1.0,
+                 stride=1.0,
+                 center_sample=True,
+                 center_sample_point_num=4096,
+                 has_fpfh=False,
+                 fpfh_normal_radius=0.05,
+                 fpfh_feature_radius=0.05,
+                 skip_small_block=True,
+                 skip_thresh=100
+                 ):
+    if has_fpfh:
+        data,label,fpfhs=read_pkl(filename)
+    else:
+        data,label=read_room_h5(filename)
 
     data[:,:3]-=np.min(data[:,:3],axis=0,keepdims=True)
-    room_downsample,room_indices=points_downsample(data,room_downsample_interval)
-    block_data_list, block_label_list, block_indices_list, block_beg_list=\
-        room2blocks_with_indices(data, label, room_indices, block_size=block_size, stride=stride)
+    room_downsample,room_indices=points_downsample(data, room_sample_interval)
+    context_conds, context_beg_list=room2blocks_cond(data, block_size=context_size, stride=stride, center_size=center_size)
 
     block_list=[]
-    for i in xrange(len(block_data_list)):
-        xcond= (block_data_list[i][:, 0] >= block_beg_list[i][0] + (block_size-stride)/2.0) & \
-               (block_data_list[i][:, 0] <= block_beg_list[i][0] + (block_size-stride)/2.0+1.0)
-        ycond= (block_data_list[i][:, 1] >= block_beg_list[i][1] + (block_size-stride)/2.0) & \
-               (block_data_list[i][:, 1] <= block_beg_list[i][1] + (block_size-stride)/2.0+1.0)
-        cond=xcond&ycond
+    for i in xrange(len(context_conds)):
+        context_raw_data=data[context_conds[i]]
+        cond=get_center_cond(context_raw_data,context_beg_list[i],context_size,center_size)
 
         # less than 100 points not considered
-        if np.sum(cond)<100:
+        if np.sum(cond)==0 or (skip_small_block and np.sum(cond)<skip_thresh):
             continue
-        block_context_downsample, block_context_indices=points_downsample(block_data_list[i], block_context_downsample_interval)
-        block_sample_data,block_sample_indices=sample_data(block_data_list[i][cond, :],block_center_point_num)
+        context_sample_data, context_sample_indices=points_downsample(context_raw_data, context_sample_interval)
+        center_raw_data=context_raw_data[cond,:]
 
         block_dict={}
-        block_dict['data']= block_sample_data
-        block_dict['label']= block_label_list[i][cond, :][block_sample_indices]
-        block_dict['cont_index']=block_context_indices[cond][block_sample_indices]
-        block_dict['room_index']= block_indices_list[i][cond][block_sample_indices]
-        block_dict['cont']=block_context_downsample
+        if center_sample:
+            center_sample_data, center_sample_indices=sample_data(center_raw_data, center_sample_point_num)
+            block_dict['data']= center_sample_data
+            block_dict['label']= label[context_conds[i]][cond][center_sample_indices]
+            block_dict['cont_index']=context_sample_indices[cond][center_sample_indices]
+            block_dict['room_index']= room_indices[context_conds[i]][cond][center_sample_indices]
+            block_dict['cont']=context_sample_data
+            if has_fpfh:
+                block_dict['feat']=fpfhs[context_conds[i]][cond][center_sample_indices]
+            else:
+                context_raw_indices=np.arange(len(context_raw_data))
+                center_raw_indices=context_raw_indices[cond]
+                center_fpfh_indices=center_raw_indices[center_sample_indices]
+                center_fpfh_indices=np.asarray(center_fpfh_indices,dtype=np.int64)
+                # print np.max(center_fpfh_indices)
+                # print len(context_raw_data)
+                # print 'begin'
+                center_fpfh=FPFHExtractor.extractFPFHIndices\
+                    (context_raw_data[:,:3],center_fpfh_indices,fpfh_normal_radius,fpfh_feature_radius)
+                # print 'here'
+                block_dict['feat']=center_fpfh
+                # print center_fpfh.shape
+                # print center_sample_data.shape
+        else:
+            block_dict['data']= center_raw_data
+            block_dict['label']= label[context_conds[i]][cond]
+            block_dict['cont_index']=context_sample_indices[cond]
+            block_dict['room_index']= room_indices[context_conds[i]][cond]
+            block_dict['cont']=context_sample_data
+            if has_fpfh:
+                block_dict['feat']=fpfhs[context_conds[i]][cond]
 
         block_list.append(block_dict)
 
     return block_list,room_downsample
 
+def one_file(fn_i,fn,f_stem):
+    block_list,room_downsample=room2context(fn,stride=0.5)
+    with open('../data/S3DIS/tmp/'+f_stem+'.pkl','w') as f:
+        cPickle.dump([block_list,room_downsample],f)
+    print '{} {} done'.format(fn_i,f_stem)
 
-def room2context_without_sample(room_f5_file='../data/S3DIS/room/260_Area_6_office_35.h5',
-                                 room_downsample_interval=0.2,
-                                 block_context_downsample_interval=0.1,
-                                 block_size=2.0,
-                                 stride=1.0):
-    data,label=read_room_h5(room_f5_file)
-
-    data[:,:3]-=np.min(data[:,:3],axis=0,keepdims=True)
-    room_downsample,room_indices=points_downsample(data,room_downsample_interval)
-    block_data_list, block_label_list, block_indices_list, block_beg_list=\
-        room2blocks_with_indices(data, label, room_indices, block_size=block_size, stride=stride)
-
-    block_list=[]
-    for i in xrange(len(block_data_list)):
-        xcond= (block_data_list[i][:, 0] >= block_beg_list[i][0] + (block_size-stride)/2.0) & \
-               (block_data_list[i][:, 0] <= block_beg_list[i][0] + (block_size-stride)/2.0+1.0)
-        ycond= (block_data_list[i][:, 1] >= block_beg_list[i][1] + (block_size-stride)/2.0) & \
-               (block_data_list[i][:, 1] <= block_beg_list[i][1] + (block_size-stride)/2.0+1.0)
-        cond=xcond&ycond
-
-        # less than 100 points not considered
-        if np.sum(cond)<100:
-            continue
-        block_context_downsample, block_context_indices=points_downsample(block_data_list[i], block_context_downsample_interval)
-        block_sample_data,block_sample_indices=sample_data(block_data_list[i][cond, :],block_center_point_num)
-
-        block_dict={}
-        block_dict['data']= block_sample_data
-        block_dict['label']= block_label_list[i][cond, :][block_sample_indices]
-        block_dict['cont_index']=block_context_indices[cond][block_sample_indices]
-        block_dict['room_index']= block_indices_list[i][cond][block_sample_indices]
-        block_dict['cont']=block_context_downsample
-
-        block_list.append(block_dict)
-
-    return block_list,room_downsample
-
-def room2context_all():
+############for training set###############
+def generate_trainset():
     room_files=[fn for fn in glob.glob(os.path.join('../data/S3DIS/room','*.h5'))]
+
+
+    executor=ProcessPoolExecutor(max_workers=7)
+    futures=[]
     for rf_i,rf in enumerate(room_files):
         rf_stem=os.path.basename(rf[:-3])
-        block_list,room_downsample=room2context(rf)
-        with open(rf_stem+'.pkl','w') as f:
-            cPickle.dump([block_list,room_downsample],f)
-        print '{} {} done'.format(rf_i,rf_stem)
+        futures.append(executor.submit(one_file,rf_i,rf,rf_stem))
+
+    wait(futures)
+
+def normalize_trainset():
+    train_fs,test_fs,_,_=get_train_test_split()
+    for rf_i,rf in enumerate(test_fs):
+        block_list,room_sample_data=read_pkl('../data/S3DIS/tmp/' + rf + '.pkl')
+        block_list, room_sample_data=normalize_v2(block_list,room_sample_data)
+        save_pkl([block_list,room_sample_data],'../data/S3DIS/train_v2_more/'+rf+'.pkl')
+
+
 
 # compute local feature (fpfh) for each block
 def output_bnr_block_points(room_file_name,room_dir,room_context_dir,output_dir,):
@@ -372,7 +453,7 @@ def read_feats(feats_file):
 
 def merge_local_feats_context(file_stem,output_dir,feats_dir,context_dir):
     feats=read_feats(feats_dir+file_stem+'.feats')
-    block_list,room_downsample=read_room_context(context_dir+file_stem+'.pkl')
+    block_list,room_downsample=read_pkl(context_dir + file_stem + '.pkl')
 
     feats=np.reshape(feats,[len(block_list),-1,feats.shape[1]])
 
@@ -380,12 +461,16 @@ def merge_local_feats_context(file_stem,output_dir,feats_dir,context_dir):
         block['feat']=feat
 
     save_pkl([block_list,room_downsample],output_dir+file_stem+".pkl")
+###########################################
 
 def test_fpfh_kmeans():
-    feats=read_feats('268_Area_6_office_8.feats')
+    # feats=read_feats('268_Area_6_office_8.feats')
 
-    block_list, room_downsample=read_room_context('../data/S3DIS/room_context/268_Area_6_office_8.pkl')
+    block_list, room_downsample=read_pkl('../data/S3DIS/room_context_fpfh/268_Area_6_office_8.pkl')
     block_points=[block['data'] for block in block_list]
+    feats=[block['feat'] for block in block_list]
+    feats=np.concatenate(feats,axis=0)
+    feats/=100
     block_points=np.concatenate(block_points,axis=0)
 
     from sklearn.cluster import KMeans
@@ -478,12 +563,39 @@ def test_downsample():
         for pt in downsample_data:
             f.write('{} {} {} {} {} {}\n'.format(pt[0],pt[1],pt[2],pt[3],pt[4],pt[5]))
 
+#######normalize training set############
 def normalize(pts):
     pts-=(np.max(pts,axis=0,keepdims=True)+np.min(pts,axis=0,keepdims=True))/2.0
     dist=pts[:,0]**2+pts[:,1]**2+pts[:,2]**2
     max_dist=np.sqrt(np.max(dist,axis=0,keepdims=True))
     pts/=max_dist
     return pts
+
+def normalize_room(pts):
+    pts-=np.min(pts,axis=0,keepdims=True)
+    pts/=np.max(pts,axis=0,keepdims=True)
+
+    return pts
+
+def normalize_context(pts,block_size):
+    pts-=np.min(pts,axis=0,keepdims=True)
+    pts[:, 0] -= block_size / 2.0
+    pts[:, 1] -= block_size / 2.0
+
+    return pts
+
+
+def normalize_v2(block_list, global_pts):
+    for block in block_list:
+        block['cont'][:, :3]=normalize_context(block['cont'][:,:3],2.0)
+        block['cont'][:, 3:]/=255.0
+        block['feat']/=100
+
+    global_pts[:, :3]=normalize_room(global_pts[:,:3])
+    global_pts[:, 3:]/=255.0
+
+    return block_list,global_pts
+
 
 def normalize_all():
     import time
@@ -492,50 +604,114 @@ def normalize_all():
     f.close()
 
     begin=time.time()
-    for fs in file_stems:
-        block_list,global_pts=read_room_context('../data/S3DIS/room_context_fpfh/'+fs+'.pkl','rb')
-        for block in block_list:
-            block['cont'][:, :3]=normalize(block['cont'][:,:3])
-            block['cont'][:, 3:]-=128.0
-            block['cont'][:, 3:]/=128.0
-            block['feat']-=50
-            block['feat']/=50
-            # print np.max(block['feat'],axis=0),np.min(block['feat'],axis=0)
-
-        global_pts[:, :3]=normalize(global_pts[:,:3])
-        global_pts[:, 3:]-=128.0
-        global_pts[:, 3:]/=128.0
-        save_pkl((block_list,global_pts),'../data/S3DIS/train/'+fs+'.pkl')
+    for fsi,fs in enumerate(file_stems):
+        block_list,global_pts=read_pkl('../data/S3DIS/room_context_fpfh/' + fs + '.pkl', 'rb')
+        normalize_v2(block_list,global_pts)
+        save_pkl((block_list,global_pts),'../data/S3DIS/train_v2/'+fs+'.pkl')
+        print fsi
 
 
     print 'cost {} s'.format(time.time()-begin)
 
-def get_train_test_split():
-    import os
-    path=os.path.split(os.path.realpath(__file__))[0]
-    f=open(path+'/room_stems.txt','r')
-    file_stems=[line.strip('\n') for line in f.readlines()]
-    f.close()
+def test_normalize():
+    import matplotlib.pyplot as plt
+    block_list,global_pts=read_pkl('../data/S3DIS/train_v2/107_Area_4_conferenceRoom_1.pkl')
 
-    f=open(path+'/room_block_nums.txt','r')
-    block_nums=[int(line.strip('\n')) for line in f.readlines()]
-    f.close()
+    print 'global: min {}\n max {}\n mean {}'.format(np.min(global_pts,axis=0),np.max(global_pts,axis=0),np.mean(global_pts,axis=0))
+    context_pts=[block['cont'] for block in block_list]
+    context_pts=np.concatenate(context_pts,axis=0)
+    print context_pts.shape
+    print 'context: min {}\n max {}\n mean {}'.format(np.min(context_pts,axis=0),np.max(context_pts,axis=0),np.mean(context_pts,axis=0))
+    feats=[block['feat'] for block in block_list]
+    feats=np.concatenate(feats,axis=0)
+    print 'feats: min {}\n max {}\n mean {}'.format(np.min(feats,axis=0),np.max(feats,axis=0),np.mean(feats,axis=0))
+    labels=[block['label'] for block in block_list]
+    labels=np.concatenate(labels,axis=0)
+    print 'labels: min {}\n max {}\n mean {}'.format(np.min(labels,axis=0),np.max(labels,axis=0),np.mean(labels,axis=0))
 
-    # use area 5 as test
-    train,test=[],[]
-    train_nums,test_nums=[],[]
-    for fs,bn in zip(file_stems,block_nums):
-        if fs.split('_')[2]=='5':
-            test.append(fs)
-            test_nums.append(bn)
-        else:
-            train.append(fs)
-            train_nums.append(bn)
+    plt.hist(labels)
+    plt.show()
+##########################################
 
-    return train,test,train_nums,test_nums
+###########testset#######################
+def extract_fpfh_testset():
 
+    import time
+    train_fs,test_fs,_,_=get_train_test_split()
+    print len(test_fs)
+    begin=time.time()
+    for rf_i,rf in enumerate(test_fs):
+        data,label=read_room_h5('../data/S3DIS/room/'+rf+'.h5')
+        fpfhs=FPFHExtractor.extractFPFH(data[:,:3],0.05,0.05)
+        save_pkl([data,label,fpfhs],'../data/S3DIS/tmp/'+rf+'.pkl')
+        print '{} cost {} s'.format(rf_i,time.time()-begin)
+        begin=time.time()
 
+def generate_testset():
+    train_fs,test_fs,_,_=get_train_test_split()
+    for rf_i,rf in enumerate(test_fs):
+        block_list,room_sample_data=room2context('../data/S3DIS/testset_raw/' + rf + '.pkl',
+                                                 has_fpfh=True,center_sample=False,skip_small_block=False)
+        save_pkl([block_list,room_sample_data],'../data/S3DIS/testset_context/' + rf + '.pkl')
+
+def normalize_testset():
+    train_fs,test_fs,_,_=get_train_test_split()
+    for rf_i,rf in enumerate(test_fs):
+        block_list,room_sample_data=read_pkl('../data/S3DIS/testset_context/' + rf + '.pkl')
+        block_list, room_sample_data=normalize_v2(block_list,room_sample_data)
+        save_pkl([block_list,room_sample_data],'../data/S3DIS/test_v2/'+rf+'.pkl')
+
+def test_feats_testset():
+    from sklearn.cluster import KMeans
+    train_fs,test_fs,_,_=get_train_test_split()
+    for rf_i,rf in enumerate(test_fs):
+        data,label,fpfhs=read_pkl('../data/S3DIS/testset_raw/' + rf + '.pkl')
+        indices=np.random.randint(0,len(data),[102400])
+
+        block_points=data[indices]
+        feats=fpfhs[indices]
+        cluster_num=5
+
+        pred=KMeans(n_clusters=cluster_num,n_jobs=-1).fit_predict(feats)
+
+        print pred.shape
+
+        colors=np.random.randint(0,255,[cluster_num,3],dtype=np.int)
+        for i in range(cluster_num):
+            with open("{}.txt".format(i),'w') as f:
+                for pt in block_points[pred==i]:
+                    f.write('{} {} {} {} {} {}\n'.format(pt[0],pt[1],pt[2],colors[i,0],colors[i,1],colors[i,2]))
+        break
 
 if __name__=="__main__":
-    print len(get_train_test_split()[0])
-    print len(get_train_test_split()[1])
+    # normalize_all()
+    # test_normalize()
+    # test_fpfh_kmeans()
+    # generate_testset()
+    # generate_testset()
+    # normalize_testset()
+    #
+    # block_list,room_data=room2context(context_size=2.0,stride=0.5,center_size=1.0)
+    # test_room2context(block_list,room_data)
+    # normalize_trainset()
+
+
+    # train_fs,test_fs=get_train_test_split()
+    # train_fs+=test_fs
+    # counts=np.zeros(13)
+    # for rf_i,rf in enumerate(train_fs):
+    #     block_list,room_sample_data=read_pkl('../data/S3DIS/train_v2_nostairs/' + rf + '.pkl')
+    #     for block in block_list:
+    #         for l in range(13):
+    #             counts[l]+=np.sum(block['label']==l)
+    #
+    # for c in counts:
+    #     print str(int(c))+','
+
+
+    import matplotlib.pyplot as plt
+
+    counts=[26216625,23867455,26435178,2153315,1671711,1443172,6487113,3774739,4461522,465457,5305832,1053401,11393440]
+    names=get_class_names()
+    plt.bar(names[:13],counts)
+    plt.show()

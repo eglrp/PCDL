@@ -1,7 +1,8 @@
-from s3dis_util.util import read_room_context
+from s3dis_util.util import read_pkl
 import numpy as np
 import random
 import time
+from s3dis_util.util import get_train_test_split
 
 import threading
 
@@ -27,7 +28,7 @@ class BlockProducer(threading.Thread):
                 if self.end.is_set():
                     exit(0)
                 # fetch data
-                item=read_room_context(self.file_list[fi],"rb")
+                item=read_pkl(self.file_list[fi], "rb")
                 self.data.append(item)
                 self.mutex.release()
                 self.items.release()
@@ -42,11 +43,12 @@ class BlockProducer(threading.Thread):
 
 
 class BlockProvider:
-    def __init__(self,file_list,block_nums,batch_size,max_queue_list=5,model='train'):
+    def __init__(self, file_list, batch_size, max_queue_list=5, model='train', with_original_pts=False):
         self.batch_size=batch_size
         self.file_list=file_list
         self.cur_file_pos=0
         self.file_len=len(self.file_list)
+        self.with_original_pts=with_original_pts
 
         file_indices=np.arange(0,len(file_list))
         self.model=model
@@ -62,7 +64,11 @@ class BlockProvider:
         self.producer=BlockProducer(file_list,file_indices,self.slots,self.items,self.mutex,self.queue,self.close_thread)
         self.producer.start()
 
-        self.file_block_nums = block_nums
+        self.file_block_nums=[]
+        for f in self.file_list:
+            block_list,_=read_pkl(f)
+            self.file_block_nums.append(len(block_list))
+
         self.total_size = sum(self.file_block_nums)
         self.cur_block_pos = 0
 
@@ -77,7 +83,7 @@ class BlockProvider:
 
         self.items.acquire()
         self.mutex.acquire()
-        self.block_list, self.global_pts=self.queue.pop()
+        self.block_list, self.global_pts=self.queue.pop(0)
         self.mutex.release()
         self.slots.release()
 
@@ -125,6 +131,11 @@ class BlockProvider:
         batch_data['local_feats']=local_feats
         batch_data['labels']=labels
 
+        if self.with_original_pts:
+            pts = [np.expand_dims(self.block_list[index]['data'], 0) for index in batch_indices]
+            pts = np.concatenate(pts,axis=0)
+            batch_data['data']=pts
+
         return batch_data
 
 
@@ -153,8 +164,8 @@ class BlockProvider:
 
 
 class BlockProviderMultiGPUWrapper:
-    def __init__(self,gpu_num,file_list,block_nums,batch_size,max_queue_list=5,model='train'):
-        self.producer=BlockProvider(file_list,block_nums,batch_size,max_queue_list,model)
+    def __init__(self,gpu_num,file_list,batch_size,max_queue_list=5,model='train'):
+        self.producer=BlockProvider(file_list,batch_size,max_queue_list,model)
         self.gpu_num=gpu_num
         self.end_iter=False
         self.total_size=self.producer.total_size
@@ -194,43 +205,21 @@ class BlockProviderMultiGPUWrapper:
 
 
 if __name__=="__main__":
-    f=open('s3dis_util/room_stems.txt','r')
-    file_stems=[line.strip('\n') for line in f.readlines()]
-    f.close()
-    print 'fs count: {}'.format(len(file_stems))
+    train_fs,test_fs,train_nums,test_nums=get_train_test_split()
+    train_list=['data/S3DIS/train/'+fs+'.pkl' for fs in train_fs]
+    train_reader=BlockProviderMultiGPUWrapper(2,train_list,train_nums,5,model='train')
 
-    f=open('s3dis_util/room_block_nums.txt','r')
-    block_nums=[int(line.strip('\n')) for line in f.readlines()]
-    f.close()
-
-    file_list=['data/S3DIS/train/'+fs+'.pkl' for fs in file_stems]
-
-    provider=BlockProviderMultiGPUWrapper(2,file_list,block_nums,batch_size=5,max_queue_list=5,model='train')
-    print 'done'
-
-    begin=time.time()
-    for i,data in enumerate(provider):
-        # print i,len(data[0][-3]),len(data[1][-3])
-        print data[0][-4]
-        # with open('room_{}.txt'.format(i),'w') as f:
-        #     for pt in data[0][0]:
-        #         f.write('{} {} {} {} {} {}\n'.format(pt[0],pt[1],pt[2],
-        #                                            int(pt[3]*128+128),
-        #                                            int(pt[4]*128+128),
-        #                                            int(pt[5]*128+128)))
-        #
-        #
-        # with open('block_{}.txt'.format(i),'w') as f:
-        #     for pt in data[0][2]:
-        #         f.write('{} {} {} {} {} {}\n'.format(pt[0],pt[1],pt[2],
-        #                                            int(pt[3]*128+128),
-        #                                            int(pt[4]*128+128),
-        #                                            int(pt[5]*128+128)))
-        #
-        if i >5: break
-
-    print 'cost {} s '.format(time.time()-begin)
-    provider.close()
+    for data in train_reader:
+        print np.max(data[0]['context_pts'],axis=0),np.min(data[0]['context_pts'],axis=0)
+        # print np.max(data[1]['context_pts'],axis=0),np.min(data[1]['context_pts'],axis=0)
+        print '///////////////////////'
+        print np.max(data[0]['global_pts'],axis=0),np.min(data[0]['global_pts'],axis=0)
+        # print np.max(data[1]['global_pts'],axis=0),np.min(data[1]['global_pts'],axis=0)
+        print '///////////////////////'
+        print np.max(data[0]['local_feats'],axis=(0,1))
+        print np.min(data[0]['local_feats'],axis=(0,1))
+        # print np.max(data[1]['local_feats'],axis=(0,1)),np.min(data[1]['local_feats'],axis=(0,1))
+        break
 
 
 

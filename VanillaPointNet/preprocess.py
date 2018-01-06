@@ -160,78 +160,79 @@ def local_normalized_append_with_center(pcs, indices, patch_num, centers):
     return np.concatenate([pcs,normalized_pcs],axis=2)
 
 
-class ModelBatchReader:
-    def __init__(self,batch_files,batch_size,thread_num,pt_num,input_dims,model='train',
-                 read_func=PointSample.getPointCloudRelativePolarForm,aug_func=None):
-        self.example_list = []
-        for f in batch_files:
-            model_num=PointSample.getModelNum(f)
-            for i in xrange(model_num):
-                self.example_list.append((f,i))
+# class ModelBatchReader:
+#     def __init__(self,batch_files,batch_size,thread_num,pt_num,input_dims,model='train',
+#                  read_func=PointSample.getPointCloudRelativePolarForm,aug_func=None):
+#         self.example_list = []
+#         for f in batch_files:
+#             model_num=PointSample.getModelNum(f)
+#             for i in xrange(model_num):
+#                 self.example_list.append((f,i))
+#
+#         self.model=model
+#         if model=='train':
+#             random.shuffle(self.example_list)
+#
+#         self.cur_pos=0
+#         self.executor=ThreadPoolExecutor(max_workers=thread_num)
+#         self.batch_size=batch_size
+#         self.total_size=len(self.example_list)
+#         self.pt_num=pt_num
+#         self.input_dims=input_dims
+#         self.aug_func=aug_func
+#         self.read_func=read_func
+#
+#     def __iter__(self):
+#         return self
+#
+#     def next(self):
+#
+#         if self.cur_pos>self.total_size:
+#             self.cur_pos=0
+#             if self.model=='train':
+#                 random.shuffle(self.example_list)
+#             raise StopIteration
+#
+#         cur_read_size=min(self.total_size-self.cur_pos,self.batch_size)
+#         cur_batch_list=[]
+#         cur_batch_list+=self.example_list[self.cur_pos:self.cur_pos+cur_read_size]
+#
+#         if self.model=='train':
+#             cur_sample_size=self.batch_size-cur_read_size
+#             if cur_sample_size>0:
+#                 for _ in xrange(cur_sample_size):
+#                     sample_index=random.randint(0,len(self.example_list)-1)
+#                     cur_batch_list.append(self.example_list[sample_index])
+#
+#         file_names=[t[0] for t in cur_batch_list]
+#         model_indices=[t[1] for t in cur_batch_list]
+#         pt_nums=[self.pt_num for _ in xrange(len(cur_batch_list))]
+#
+#         input_total_dim=1
+#         if self.input_dims is list:
+#             for dim in self.input_dims:
+#                 input_total_dim*=dim
+#
+#             input_shapes=[self.pt_num*self.input_dims[0],self.input_dims[1]]       # [pt_num*(pt_num-1),5]
+#         else:
+#             input_total_dim=self.input_dims
+#             input_shapes=[self.pt_num,self.input_dims]                        # [pt_num,3]
+#
+#         results=self.executor.map(self.read_func, file_names, model_indices, pt_nums)
+#         inputs=[]
+#         labels=[]
+#         for input,label in results:
+#             data=np.frombuffer(input,dtype=np.float64,count=self.pt_num*input_total_dim)
+#             inputs.append(np.reshape(data,input_shapes).astype(np.float32))
+#             labels.append(label)
+#
+#         if self.aug_func is not None:
+#             inputs=self.aug_func(np.asarray(inputs))
+#
+#         self.cur_pos+=self.batch_size
+#
+#         return np.asarray(inputs),np.asarray(labels)
 
-        self.model=model
-        if model=='train':
-            random.shuffle(self.example_list)
-
-        self.cur_pos=0
-        self.executor=ThreadPoolExecutor(max_workers=thread_num)
-        self.batch_size=batch_size
-        self.total_size=len(self.example_list)
-        self.pt_num=pt_num
-        self.input_dims=input_dims
-        self.aug_func=aug_func
-        self.read_func=read_func
-
-    def __iter__(self):
-        return self
-
-    def next(self):
-
-        if self.cur_pos>self.total_size:
-            self.cur_pos=0
-            if self.model=='train':
-                random.shuffle(self.example_list)
-            raise StopIteration
-
-        cur_read_size=min(self.total_size-self.cur_pos,self.batch_size)
-        cur_batch_list=[]
-        cur_batch_list+=self.example_list[self.cur_pos:self.cur_pos+cur_read_size]
-
-        if self.model=='train':
-            cur_sample_size=self.batch_size-cur_read_size
-            if cur_sample_size>0:
-                for _ in xrange(cur_sample_size):
-                    sample_index=random.randint(0,len(self.example_list)-1)
-                    cur_batch_list.append(self.example_list[sample_index])
-
-        file_names=[t[0] for t in cur_batch_list]
-        model_indices=[t[1] for t in cur_batch_list]
-        pt_nums=[self.pt_num for _ in xrange(len(cur_batch_list))]
-
-        input_total_dim=1
-        if self.input_dims is list:
-            for dim in self.input_dims:
-                input_total_dim*=dim
-
-            input_shapes=[self.pt_num*self.input_dims[0],self.input_dims[1]]       # [pt_num*(pt_num-1),5]
-        else:
-            input_total_dim=self.input_dims
-            input_shapes=[self.pt_num,self.input_dims]                        # [pt_num,3]
-
-        results=self.executor.map(self.read_func, file_names, model_indices, pt_nums)
-        inputs=[]
-        labels=[]
-        for input,label in results:
-            data=np.frombuffer(input,dtype=np.float64,count=self.pt_num*input_total_dim)
-            inputs.append(np.reshape(data,input_shapes).astype(np.float32))
-            labels.append(label)
-
-        if self.aug_func is not None:
-            inputs=self.aug_func(np.asarray(inputs))
-
-        self.cur_pos+=self.batch_size
-
-        return np.asarray(inputs),np.asarray(labels)
 
 import h5py
 class H5ReaderAll:
@@ -284,6 +285,7 @@ class H5ReaderAll:
         self.cur_pos+=self.batch_size
         return batch_data,batch_label
 
+
 class H5ReaderBatch:
     def __init__(self, file_list, batch_size, aug_func=None, model='train'):
         data = []
@@ -333,6 +335,7 @@ class H5ReaderBatch:
 
         self.cur_pos += self.batch_size
         return batch_data, batch_label
+
 
 #################test code below##################
 def test_reader():

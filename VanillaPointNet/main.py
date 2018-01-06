@@ -297,7 +297,7 @@ def train_split():
 
 def train_segmetation():
     gpu_num=2
-    lr_init=1e-1
+    lr_init=1e-2
     lr_decay_rate=0.9
     lr_decay_epoch=5
     bn_init=0.95
@@ -401,8 +401,9 @@ def train_segmetation():
         saver.save(sess,model_dir+'/epoch{}.ckpt'.format(i))
 
 def train_context_segmetation():
+    from seg_predict import compute_iou
     gpu_num=2
-    lr_init=1e-1
+    lr_init=1e-3
     lr_decay_rate=0.9
     lr_decay_epoch=5
     bn_init=0.95
@@ -410,24 +411,25 @@ def train_context_segmetation():
     bn_decay_epoch=5
     bn_clip=0.95
 
-    batch_size=10
+    batch_size=8
     point_num=4096
     input_dim=6
     local_feat_dim=33
-    final_dim=512
+    final_dim=1024
 
     log_epoch=30
     model_dir='model'
     train_epoch_num=500
-    num_classes=14
+    num_classes=13
 
-    train_fs,test_fs,train_nums,test_nums=get_train_test_split()
-    train_list=['data/S3DIS/train/'+fs+'.pkl' for fs in train_fs]
-    test_list=['data/S3DIS/train/'+fs+'.pkl' for fs in test_fs]
-    train_reader=BlockProviderMultiGPUWrapper(gpu_num,train_list,train_nums,batch_size,model='train')
-    test_reader=BlockProviderMultiGPUWrapper(gpu_num,test_list,test_nums,batch_size,model='test')
+    train_fs,test_fs=get_train_test_split()
+    train_list=['data/S3DIS/train_v2_nostairs/'+fs+'.pkl' for fs in train_fs]
+    test_list=['data/S3DIS/train_v2_nostairs/'+fs+'.pkl' for fs in test_fs]
+    train_reader=BlockProviderMultiGPUWrapper(gpu_num,train_list,batch_size,model='train')
+    test_reader=BlockProviderMultiGPUWrapper(gpu_num,test_list,batch_size,model='test')
 
     total_size=train_reader.total_size
+    print total_size
 
     global_pts=[]
     global_indices=[]
@@ -448,22 +450,23 @@ def train_context_segmetation():
 
     is_training=tf.placeholder(tf.bool)
 
-    net=ContextSegmentationNetwork(input_dim,num_classes,True,local_feat_dim,final_dim)
+    net=ContextSegmentationNetwork(input_dim,num_classes,False,local_feat_dim,final_dim)
     net.declare_train_net(global_pts,global_indices,local_feats,
                           context_pts,context_batch_indices,context_block_indices,
                           labels,is_training,gpu_num,
                           lr_init,lr_decay_rate,lr_decay_epoch,
                           bn_init,bn_decay_rate,bn_decay_epoch,bn_clip,
-                          batch_size,total_size)
+                          batch_size*gpu_num,total_size)
 
-    saver=tf.train.Saver()
+    saver=tf.train.Saver(max_to_keep=500)
     config = tf.ConfigProto()
     config.gpu_options.allow_growth = True
     config.allow_soft_placement = True
     config.log_device_placement = False
     sess = tf.Session(config=config)
     sess.run(tf.global_variables_initializer())
-    # saver.restore(sess,'model/epoch53.ckpt')
+    # saver.restore(sess,'model/train_1_3_seg/epoch56.ckpt')
+    # saver.restore()
 
     merged = tf.summary.merge_all()
     train_writer = tf.summary.FileWriter('train',sess.graph)
@@ -502,8 +505,11 @@ def train_context_segmetation():
                     begin=time.time()
 
             test_correct_num = 0
+            set_preds=[]
+            set_labels=[]
             for data in test_reader:
                 test_labels = []
+
                 for k in xrange(gpu_num):
                     feed_dict[global_pts[k]] = data[k]['global_pts']
                     feed_dict[global_indices[k]] = data[k]['global_indices']
@@ -521,8 +527,16 @@ def train_context_segmetation():
                 test_labels = np.concatenate(test_labels, axis=0)
                 test_correct_num += np.sum(preds == test_labels)
 
-            log_info('epoch {}: test accuracy {}'.format(i, test_correct_num / float(test_reader.total_size * point_num)))
-            saver.save(sess, model_dir + '/epoch{}.ckpt'.format(i))
+                set_preds.append(preds.flatten())
+                set_labels.append(test_labels.flatten())
+
+            set_labels=np.concatenate(set_labels,axis=0)
+            set_preds=np.concatenate(set_preds,axis=0)
+
+            iou, miou, oiou, acc, macc, oacc = compute_iou(set_labels,set_preds)
+            log_info('epoch {}: mean iou {:.5} overall iou {:.5} \n\t mean acc {:.5} overall acc {:.5}'.
+                     format(i,miou, oiou, macc, oacc))
+            saver.save(sess, model_dir + '/epoch{}_{:.3}.ckpt'.format(i,miou))
 
     finally:
         train_reader.close()

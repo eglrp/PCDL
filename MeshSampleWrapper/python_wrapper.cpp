@@ -85,110 +85,7 @@ getAugmentedPointCloud(PyObject* self,PyObject* args)
 }
 
 static PyObject*
-getAugmentedPointCloudWithDiff(PyObject* self,PyObject* args)
-{
-    const char* filename;
-    unsigned int index;
-    unsigned int point_num;
-    double noise_level;
-    if(!PyArg_ParseTuple(args,"siid",&filename,&index,&point_num,&noise_level))
-        return NULL;
-
-    //read data
-    std::vector<double> vertexes;
-    std::vector<unsigned int> faces;
-    std::vector<double> areas;
-    double total_area;
-    unsigned int category;
-    readBatchFileData(filename,index,vertexes,faces,areas,total_area,category);
-
-    //sample points
-    std::vector<double> point_cloud;
-    sampleMeshPoints(vertexes,faces,areas,total_area,point_num,point_cloud);
-
-    //normalize
-    normalize(point_cloud);
-    //rotated point cloud
-    rotatePointCloud(point_cloud);
-    //add noise
-    addNoise(point_cloud,noise_level);
-    //normalize
-    normalize(point_cloud);
-
-    std::vector<double> dists;
-    computeDists(point_cloud,dists);
-
-    return Py_BuildValue("s#is#", reinterpret_cast<char *>(point_cloud.begin().base()),point_cloud.size()*sizeof(double),category,
-                         reinterpret_cast<char *>(dists.begin().base()),dists.size()*sizeof(double));
-}
-
-static PyObject*
-getPointInterval(PyObject* self,PyObject* args)
-{
-    PyArrayObject* pts;
-    double thresh;
-    if(!PyArg_ParseTuple(args,"Od",&pts,&thresh)) return NULL;
-
-    if(pts->nd!=4)
-    {
-        PyErr_SetString(PyExc_RuntimeError,"Dimension must be 4");
-        return NULL;
-    }
-    if(pts->dimensions[3]!=1||pts->dimensions[2]!=3)
-    {
-        PyErr_SetString(PyExc_RuntimeError,"Input vector must be [?,?,3,1]");
-        return NULL;
-    }
-    if(pts->descr->type_num!=NPY_FLOAT)
-    {
-        PyErr_SetString(PyExc_RuntimeError,"Must be float64(double) array");
-        return NULL;
-    }
-
-    int batch_size=pts->dimensions[0];
-    int pt_num=pts->dimensions[1];
-    npy_intp dims[3]={batch_size,pt_num,pt_num};
-    PyArrayObject* dist_array=reinterpret_cast<PyArrayObject*>(PyArray_New(&PyArray_Type,
-                                                                           3,
-                                                                           dims,
-                                                                           NPY_FLOAT,
-                                                                           NULL,
-                                                                           NULL,
-                                                                           sizeof(float),
-                                                                           NULL,
-                                                                           NULL));
-
-    int _ps0=pts->strides[0],_ps1=pts->strides[1],_ps2=pts->strides[2];
-    int _ds0=dist_array->strides[0],_ds1=dist_array->strides[1],_ds2=dist_array->strides[2];
-
-    for(int i=0;i<batch_size;i++)
-    {
-        for(int j=0;j<pt_num;j++)
-        {
-            float x1=*reinterpret_cast<float*>(pts->data+i*_ps0+j*_ps1);
-            float y1=*reinterpret_cast<float*>(pts->data+i*_ps0+j*_ps1+1*_ps2);
-            float z1=*reinterpret_cast<float*>(pts->data+i*_ps0+j*_ps1+2*_ps2);
-            for(int k=0;k<pt_num;k++)
-            {
-                float x2=*reinterpret_cast<float*>(pts->data+i*_ps0+k*_ps1);
-                float y2=*reinterpret_cast<float*>(pts->data+i*_ps0+k*_ps1+1*_ps2);
-                float z2=*reinterpret_cast<float*>(pts->data+i*_ps0+k*_ps1+2*_ps2);
-
-                float dist=std::sqrt((x1-x2)*(x1-x2)+(y1-y2)*(y1-y2)+(z1-z2)*(z1-z2));
-                float weight=1.f-dist/thresh;
-                *reinterpret_cast<float*>(dist_array->data+i*_ds0+j*_ds1+k*_ds2)=weight<0.0?0.f:weight;
-            }
-        }
-
-    }
-
-
-
-    return Py_BuildValue("N",dist_array);
-}
-
-static PyObject*
-getPointCloudRelativePolarForm(PyObject* self,PyObject* args)
+getPointCloudNormal(PyObject* self,PyObject* args)
 {
     const char* filename;
     unsigned int index;
@@ -206,23 +103,38 @@ getPointCloudRelativePolarForm(PyObject* self,PyObject* args)
 
     //sample points
     std::vector<double> point_cloud;
-    sampleMeshPoints(vertexes,faces,areas,total_area,point_num,point_cloud);
+    std::vector<double> normal_cloud;
+    sampleMeshPoints(vertexes,faces,areas,total_area,point_num,point_cloud,normal_cloud);
 
-    //polar form
-    std::vector<double> relative_polar_pc;
-    transformToRelativePolarForm(point_cloud,relative_polar_pc);
+    //convert to numpy array
+    npy_intp pt_num=point_cloud.size()/3;
+    npy_intp dims[2]={pt_num,3};
+    PyArrayObject* pts=reinterpret_cast<PyArrayObject*>(
+            PyArray_New(&PyArray_Type,2,dims, NPY_FLOAT,NULL,NULL,sizeof(float),NULL,NULL));
+    PyArrayObject* normals=reinterpret_cast<PyArrayObject*>(
+            PyArray_New(&PyArray_Type,2,dims, NPY_FLOAT,NULL,NULL,sizeof(float),NULL,NULL));
 
-    return Py_BuildValue("s#i", reinterpret_cast<char *>(relative_polar_pc.begin().base()),
-                         relative_polar_pc.size()*sizeof(double),category);
+    npy_int _ps0=pts->strides[0],_ps1=pts->strides[1],
+            _ns0=normals->strides[0],_ns1=normals->strides[1];
+    for(int i=0;i<pt_num;i++)
+    {
+        *reinterpret_cast<float*>(pts->data+i*_ps0)=static_cast<float>(point_cloud[i*3]);
+        *reinterpret_cast<float*>(pts->data+i*_ps0+1*_ps1)=static_cast<float>(point_cloud[i*3+1]);
+        *reinterpret_cast<float*>(pts->data+i*_ps0+2*_ps1)=static_cast<float>(point_cloud[i*3+2]);
+        *reinterpret_cast<float*>(normals->data+i*_ns0)=static_cast<float>(normal_cloud[i*3]);
+        *reinterpret_cast<flo   at*>(normals->data+i*_ns0+1*_ns1)=static_cast<float>(normal_cloud[i*3+1]);
+        *reinterpret_cast<float*>(normals->data+i*_ns0+2*_ns1)=static_cast<float>(normal_cloud[i*3+2]);
+    }
+
+    return Py_BuildValue("NNi",pts,normals,category);
 }
+
 
 static PyMethodDef SampleMethods[]={
         {"getModelNum",getModelNum,METH_VARARGS,""},
         {"getPointCloud",getPointCloud,METH_VARARGS,""},
         {"getAugmentedPointCloud",getAugmentedPointCloud,METH_VARARGS,""},
-        {"getPointInterval",getPointInterval,METH_VARARGS,""},
-        {"getAugmentedPointCloudWithDiff",getAugmentedPointCloudWithDiff,METH_VARARGS,""},
-        {"getPointCloudRelativePolarForm",getPointCloudRelativePolarForm,METH_VARARGS,""},
+        {"getPointCloudNormal",getPointCloudNormal,METH_VARARGS,""},
         {NULL,NULL,NULL,NULL}
 };
 
