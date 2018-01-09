@@ -389,7 +389,6 @@ def one_file(fn_i,fn,f_stem):
 def generate_trainset():
     room_files=[fn for fn in glob.glob(os.path.join('../data/S3DIS/room','*.h5'))]
 
-
     executor=ProcessPoolExecutor(max_workers=7)
     futures=[]
     for rf_i,rf in enumerate(room_files):

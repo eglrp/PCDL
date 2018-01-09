@@ -77,9 +77,5 @@ def test_feature_gradients():
     plt.show()
 
 
-
-
 if __name__=="__main__":
     test_feature_gradients()
-
-

@@ -34,7 +34,7 @@ class Reader:
     def get_batch(self,data,batch_size,total_size,cur_pos,items,slots,mutex):
         pass
 
-class NormalDataReader(Reader):
+class NormalDiffReader(Reader):
     def __init__(self,sample_num,neighbor_size):
         Reader.__init__(self)
         self.sample_num=sample_num
@@ -97,7 +97,7 @@ class NormalDataReader(Reader):
 
         return (all_points,all_indices,all_labels.flatten()),cur_pos
 
-class DiffDataReader(Reader):
+class NormalReader(Reader):
     def __init__(self,sample_num,noise_level):
         Reader.__init__(self)
         self.sample_num=sample_num
@@ -139,6 +139,46 @@ class DiffDataReader(Reader):
         all_labels=np.asarray(all_labels,dtype=np.int64)
 
         return (all_points,all_normals,all_labels.flatten()),cur_pos
+
+class PointReader(Reader):
+    def __init__(self,sample_num,noise_level):
+        Reader.__init__(self)
+        self.sample_num=sample_num
+        self.noise_level=noise_level
+
+    def get_example(self, example_file, example_index, model, data):
+        points, label = PointSample.getPointCloud(example_file, example_index, self.sample_num)
+        # normalize
+        points = normalize(points)
+        if model == 'train':
+            # rotation
+            rotation_angle = np.random.uniform() * 2 * np.pi
+            points = rotate(points, rotation_angle)
+            # add noise
+            points += np.random.normal(0, self.noise_level, points.shape)
+            # normalize
+            points = normalize(points)
+
+        data.append((points, label))
+
+    def get_batch(self,data,batch_size,total_size,cur_pos,items,slots,mutex):
+        all_points,all_labels=[],[]
+        cur_size=0
+        while cur_pos<total_size and cur_size<batch_size:
+            items.acquire()
+            mutex.acquire()
+            points,label=data.pop(0)
+            mutex.release()
+            slots.release()
+            all_points.append(np.expand_dims(points,axis=0))
+            all_labels.append(label)
+            cur_pos+=1
+            cur_size+=1
+
+        all_points=np.concatenate(all_points,axis=0)
+        all_labels=np.asarray(all_labels,dtype=np.int64)
+
+        return (all_points,all_labels.flatten()),cur_pos
 
 class PointSampler(threading.Thread):
     def __init__(self,example_list,model,slots,items,mutex,data,end,reader):
@@ -270,11 +310,15 @@ if __name__=="__main__":
     import time
     train_batch_files=['data/ModelNet40/train0.batch',]
 
-    train_provider = PointSampleProvider(train_batch_files, 30, NormalDataReader(2048,5), 'train')
+    train_provider = PointSampleProvider(train_batch_files, 30, PointReader(2048, 1e-3), 'train')
     try:
         begin=time.time()
-        for data,indices,label in train_provider:
-            print data.shape,indices.shape,label.shape
+        for data,label in train_provider:
+            # with open('test.txt','w') as f:
+            #     for pt in data[0]:
+            #         f.write('{} {} {}\n'.format(pt[0],pt[1],pt[2]))
+            # break
+            print data.shape,label.shape
             print 'cost {} s'.format(time.time()-begin)
             begin=time.time()
         print 'done'

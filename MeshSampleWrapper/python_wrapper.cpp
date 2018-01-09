@@ -47,7 +47,19 @@ getPointCloud(PyObject* self,PyObject* args)
     std::vector<double> point_cloud;
     sampleMeshPoints(vertexes,faces,areas,total_area,point_num,point_cloud);
 
-    return Py_BuildValue("s#i", reinterpret_cast<char *>(point_cloud.begin().base()),point_cloud.size()*sizeof(double),category);
+    npy_intp pt_num=point_cloud.size()/3;
+    npy_intp dims[2]={pt_num,3};
+    PyArrayObject* pts=reinterpret_cast<PyArrayObject*>(
+            PyArray_New(&PyArray_Type,2,dims, NPY_FLOAT,NULL,NULL,sizeof(float),NULL,NULL));
+    npy_int _ps0=pts->strides[0],_ps1=pts->strides[1];
+    for(int i=0;i<pt_num;i++)
+    {
+        *reinterpret_cast<float*>(pts->data+i*_ps0)=static_cast<float>(point_cloud[i*3]);
+        *reinterpret_cast<float*>(pts->data+i*_ps0+1*_ps1)=static_cast<float>(point_cloud[i*3+1]);
+        *reinterpret_cast<float*>(pts->data+i*_ps0+2*_ps1)=static_cast<float>(point_cloud[i*3+2]);
+    }
+
+    return Py_BuildValue("Ni", pts,category);
 }
 
 static PyObject*
@@ -122,7 +134,7 @@ getPointCloudNormal(PyObject* self,PyObject* args)
         *reinterpret_cast<float*>(pts->data+i*_ps0+1*_ps1)=static_cast<float>(point_cloud[i*3+1]);
         *reinterpret_cast<float*>(pts->data+i*_ps0+2*_ps1)=static_cast<float>(point_cloud[i*3+2]);
         *reinterpret_cast<float*>(normals->data+i*_ns0)=static_cast<float>(normal_cloud[i*3]);
-        *reinterpret_cast<flo   at*>(normals->data+i*_ns0+1*_ns1)=static_cast<float>(normal_cloud[i*3+1]);
+        *reinterpret_cast<float*>(normals->data+i*_ns0+1*_ns1)=static_cast<float>(normal_cloud[i*3+1]);
         *reinterpret_cast<float*>(normals->data+i*_ns0+2*_ns1)=static_cast<float>(normal_cloud[i*3+2]);
     }
 

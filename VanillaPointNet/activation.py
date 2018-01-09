@@ -125,7 +125,6 @@ def output_keypoints_patch():
                                                      colors[belong_indices[i,j],1],
                                                      colors[belong_indices[i,j],2]))
 
-
 def maximize_activation():
     model_path='model/epoch404.ckpt'
     net=Network(3,40,True,1024)
@@ -238,6 +237,33 @@ def show_activation():
     plt.show()
 
     print 'dead node num {}'.format(dead_unit_num)
+
+def output_activation(feature,dim,epoch,pts):
+    pt_num=pts.shape[0]
+    # indices = np.argsort(-feature[:, dim])
+    max_feature_val = np.max(feature[:, dim])
+    min_feature_val = np.min(feature[:, dim])
+
+    color_count = np.zeros(256,np.float32)
+    for i in xrange(pt_num):
+        this_color = (feature[i, dim]-min_feature_val) / (max_feature_val-min_feature_val) *255
+        color_count[int(this_color)]+=1
+
+    for i in range(1,256):
+        color_count[i]+=color_count[i-1]
+
+    color_count/=color_count[-1]
+
+    color = np.random.uniform(0, 1, [3])
+    color = color/np.sqrt(np.sum(color**2))
+    with open('result/{}_active_{}.txt'.format(epoch,dim), 'w') as f:
+        for i in xrange(pt_num):
+                this_color = color_count[int((feature[i, dim]-min_feature_val) /
+                                             (max_feature_val-min_feature_val)*255)]*color
+                this_color = np.asarray(this_color*255, np.int)
+                f.write('{} {} {} {} {} {}\n'.format(
+                    pts[i, 0], pts[i, 1], pts[i, 2],
+                    this_color[0], this_color[1], this_color[2]))
 
 def read_category_file(file_name,num_class=40):
     maps={}
