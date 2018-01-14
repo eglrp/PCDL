@@ -2,6 +2,187 @@ import threading
 import random
 from concurrent.futures import ThreadPoolExecutor
 import math
+import numpy as np
+
+
+class ProviderV2(threading.Thread):
+    def __init__(self,file_list,model,batch_size,batch_fn,read_fn,max_cache=2):
+        threading.Thread.__init__(self)
+
+        self.slots=threading.Semaphore(max_cache)
+        self.items=threading.Semaphore(0)
+        self.mutex=threading.Lock()
+        self.epoch_end=threading.Event()
+        self.thread_end=threading.Event()
+        self.data_cache=[]
+
+        self.file_list=tuple(file_list)
+        self.file_len=len(self.file_list)
+        self.indices=range(len(file_list))
+
+        self.file_cur=0
+
+        self.model=model
+        self.read_fn=read_fn
+        self.batch_fn=batch_fn
+
+        self.batch_size=batch_size
+        self.done=False
+
+        self.start()
+
+        self.request_data()
+
+    def run(self):
+        while True:
+            for idx in self.indices:
+                self.slots.acquire()
+                self.mutex.acquire()
+                if self.thread_end.is_set():
+                    exit(0)
+
+                self.data_cache.append(self.read_fn(self.file_list[idx]))
+                self.mutex.release()
+                self.items.release()
+
+            # wait for reset
+            self.epoch_end.clear()
+            self.epoch_end.wait()
+
+            if self.model=='train':
+                random.shuffle(self.indices)
+
+    def request_data(self):
+        # print 'request'
+        if self.file_cur>=self.file_len:
+            self.cur_data=None
+            return
+
+        self.items.acquire()
+        self.mutex.acquire()
+        file_data=self.data_cache.pop(0)
+        self.mutex.release()
+        self.slots.release()
+
+        self.file_cur+=1
+
+        self.cur_data=file_data
+        if self.cur_data is not None:
+            self.cur_data_index=0
+            self.cur_indices=range(self.cur_data[0].shape[0])
+            if self.model=='train':
+                random.shuffle(self.cur_indices)
+
+    def reset(self):
+        self.file_cur=0
+        self.epoch_end.set()
+
+    def close(self):
+        self.thread_end.set()
+        self.slots.release()
+        self.epoch_end.set()
+
+    def __iter__(self):
+        return self
+
+    def next(self):
+        if self.done:
+            self.done=False
+            self.reset()
+            self.request_data()
+            raise StopIteration
+
+        batch_data, actual_size = self.batch_fn(self.cur_data,self.cur_data_index,self.cur_indices,self.batch_size)
+        self.cur_data_index+=actual_size
+
+        left_size = self.batch_size - actual_size
+
+        while self.cur_data_index>=self.cur_data[0].shape[0]:
+            self.request_data()
+
+            # no data available
+            if self.cur_data is None:
+                self.done=True
+                break
+
+            # data available and we still need to sample
+            if left_size>0:
+                left_batch_data, actual_size = self.batch_fn(self.cur_data,self.cur_data_index,self.cur_indices, left_size)
+                for data_idx in xrange(len(left_batch_data)):
+                    batch_data[data_idx]=np.concatenate([batch_data[data_idx],left_batch_data[data_idx]],axis=0)
+
+                left_size -= actual_size
+                self.cur_data_index += actual_size
+            else: break
+
+        return batch_data
+
+
+######################deprecated below################
+class ThreadReader(threading.Thread):
+    def __init__(self,file_list,model,read_fn,max_cache=2):
+        threading.Thread.__init__(self)
+
+        self.slots=threading.Semaphore(max_cache)
+        self.items=threading.Semaphore(0)
+        self.mutex=threading.Lock()
+        self.epoch_end=threading.Event()
+        self.thread_end=threading.Event()
+        self.data_cache=[]
+
+        self.file_list=tuple(file_list)
+        self.file_len=len(self.file_list)
+        self.indices=range(len(file_list))
+
+        self.file_cur=0
+
+        self.model=model
+        self.read_fn=read_fn
+
+        self.start()
+
+    def run(self):
+        while True:
+            for idx in self.indices:
+                self.slots.acquire()
+                self.mutex.acquire()
+                if self.thread_end.is_set():
+                    exit(0)
+
+                self.data_cache.append(self.read_fn(self.file_list[idx]))
+                self.mutex.release()
+                self.items.release()
+
+            # wait for reset
+            self.epoch_end.clear()
+            self.epoch_end.wait()
+
+            if self.model=='train':
+                random.shuffle(self.indices)
+
+    def request_data(self):
+        # print 'request'
+        if self.file_cur>=self.file_len:
+            return None
+
+        self.items.acquire()
+        self.mutex.acquire()
+        file_data=self.data_cache.pop(0)
+        self.mutex.release()
+        self.slots.release()
+
+        self.file_cur+=1
+
+        return file_data
+
+    def reset(self):
+        self.file_cur=0
+        self.epoch_end.set()
+
+    def close(self):
+        self.thread_end.set()
+        self.slots.release()
+        self.epoch_end.set()
 
 
 class Provider(threading.Thread):

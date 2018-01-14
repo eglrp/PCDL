@@ -1,5 +1,5 @@
 import numpy as np
-import matplotlib.pyplot as plt
+
 
 def output_activation(feature, filename, dim, pts):
     pt_num=pts.shape[0]
@@ -28,12 +28,15 @@ def output_activation(feature, filename, dim, pts):
                     pts[i, 0], pts[i, 1], pts[i, 2],
                     this_color[0], this_color[1], this_color[2]))
 
+
 def output_activation_distribution(feature,dim,filename):
+    import matplotlib.pyplot as plt
     fig=plt.figure()
     ax=fig.add_subplot(111)
     ax.hist(feature[:,dim].flatten(),bins=100)
     fig.savefig(filename)
     plt.close(fig)
+
 
 def output_points(filename,pts,colors=None):
     has_color=pts.shape[1]>=6

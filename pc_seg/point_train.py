@@ -1,11 +1,14 @@
-from network.point_network import inference
-import tensorflow as tf
-import tensorflow.contrib.slim as slim
-from s3dis.point_util import *
-from provider import Provider,ProviderMultiGPUWrapper
+import argparse
 import functools
 import time
-import argparse
+
+import tensorflow as tf
+
+from point_network import inference
+from provider import Provider, ProviderMultiGPUWrapper
+from s3dis.point_util import *
+
+from train_util import log_str,average_gradients
 
 # FLAGS = tf.app.flags.FLAGS
 
@@ -20,51 +23,11 @@ parser.add_argument('--decay_epoch', type=int, default=10, help='')
 
 parser.add_argument('--log_step', type=int, default=100, help='')
 parser.add_argument('--train_dir', type=str, default='train', help='')
+parser.add_argument('--save_dir', type=str, default='model', help='')
 parser.add_argument('--log_file', type=str, default='train.log', help='')
 
 parser.add_argument('--train_epoch_num', type=int, default=500, help='')
 FLAGS = parser.parse_args()
-
-
-def log_str(message,filename=FLAGS.log_file):
-    with open(filename,'a') as f:
-        f.write(message+'\n')
-    print message
-
-def average_gradients(tower_grads):
-  """Calculate the average gradient for each shared variable across all towers.
-  Note that this function provides a synchronization point across all towers.
-  Args:
-    tower_grads: List of lists of (gradient, variable) tuples. The outer list
-      is over individual gradients. The inner list is over the gradient
-      calculation for each tower.
-  Returns:
-     List of pairs of (gradient, variable) where the gradient has been averaged
-     across all towers.
-  """
-  average_grads = []
-  for grad_and_vars in zip(*tower_grads):
-    # Note that each grad_and_vars looks like the following:
-    #   ((grad0_gpu0, var0_gpu0), ... , (grad0_gpuN, var0_gpuN))
-    grads = []
-    for g, _ in grad_and_vars:
-      # Add 0 dimension to the gradients to represent the tower.
-      expanded_g = tf.expand_dims(g, 0)
-
-      # Append on a 'tower' dimension which we will average over below.
-      grads.append(expanded_g)
-
-    # Average over the 'tower' dimension.
-    grad = tf.concat(axis=0, values=grads)
-    grad = tf.reduce_mean(grad, 0)
-
-    # Keep in mind that the Variables are redundant because they are shared
-    # across towers. So .. we will just return the first tower's pointer to
-    # the Variable.
-    v = grad_and_vars[0][1]
-    grad_and_var = (grad, v)
-    average_grads.append(grad_and_var)
-  return average_grads
 
 
 def tower_loss(feats,labels,num_classes,is_trainging,reuse=False):
@@ -106,6 +69,7 @@ def unpack_feats_labels(batch,num_gpus):
         labels=np.concatenate([labels,labels[left_idx]],axis=0)
 
     return feats,labels
+
 
 def train_ops(feats, labels, is_training, epoch_batch_num):
     ops={}
@@ -186,7 +150,7 @@ def train_one_epoch(ops,pls,sess,summary_writer,trainset,epoch_num):
 
             log_str('epoch {} step {} loss {:.5} accuracy {:.5} | {:.5} examples/s'.format(
                 epoch_num,i,total_loss,accuracy,float(total)/(time.time()-begin_time)
-            ))
+            ),FLAGS.log_file)
 
             summary_writer.add_summary(summary,global_step)
 
@@ -196,20 +160,15 @@ def train_one_epoch(ops,pls,sess,summary_writer,trainset,epoch_num):
 
 def test_one_epoch(ops, pls, sess, saver, testset, epoch_num):
     feed_dict={}
-    correct,total=0,0
     begin_time=time.time()
     all_preds,all_labels=[],[]
     for i,feed_in in enumerate(testset):
         feats,labels=unpack_feats_labels(feed_in,FLAGS.num_gpus)
 
-        # print feats.shape,labels.shape
         feed_dict[pls['feats']]=feats
-        feed_dict[pls['labels']]=labels.flatten()
-        feed_dict[pls['is_training']]=True
+        feed_dict[pls['is_training']]=False
 
-        _,correct_num,preds=sess.run([ops['apply_grad'],ops['correct_num'],ops['preds']],feed_dict)
-        correct+=correct_num
-        total+=labels.shape[0]
+        preds=sess.run(ops['preds'],feed_dict)
 
         all_preds.append(preds)
         all_labels.append(labels)
@@ -221,12 +180,10 @@ def test_one_epoch(ops, pls, sess, saver, testset, epoch_num):
 
     log_str('mean iou {:.5} overall iou {:5} \n mean acc {:5} overall acc {:5} cost {} s'.format(
         miou,oiou,macc,oacc, time.time()-begin_time
-    ))
+    ),FLAGS.log_file)
 
-    checkpoint_path = os.path.join(FLAGS.train_dir, 'model{}_{}.ckpt'.format(epoch_num,miou))
+    checkpoint_path = os.path.join(FLAGS.save_dir, 'model{}_{:.3}.ckpt'.format(epoch_num,miou))
     saver.save(sess,checkpoint_path)
-
-
 
 
 def train():

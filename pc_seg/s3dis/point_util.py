@@ -1,6 +1,7 @@
 from data_util import *
 import FPFHExtractor
 from concurrent.futures import ProcessPoolExecutor,wait
+import pyflann
 
 
 def extract_FPFH(points,indices=None,normal_radius=0.05,feature_radius=0.1):
@@ -194,5 +195,7 @@ def test_point_provider():
 
 
 if __name__=="__main__":
-    test_fpfh()
+    # test_fpfh()
     # stairs2clutter()
+    print get_train_test_split()[0]
+    print get_train_test_split()[1]

@@ -15,13 +15,13 @@ def inference(feats,is_training,num_classes,reuse=False):
         fc1=tf.contrib.layers.fully_connected(feats,64,scope='fc1',normalizer_params=normalizer_params)
 
         normalizer_params['scope']='fc2/bn'
-        fc2=tf.contrib.layers.fully_connected(fc1,128,scope='fc2')
+        fc2=tf.contrib.layers.fully_connected(fc1,128,scope='fc2',normalizer_params=normalizer_params)
 
         normalizer_params['scope']='fc3/bn'
-        fc3=tf.contrib.layers.fully_connected(fc2,128,scope='fc3')
+        fc3=tf.contrib.layers.fully_connected(fc2,128,scope='fc3',normalizer_params=normalizer_params)
 
         normalizer_params['scope']='fc4/bn'
-        fc4=tf.contrib.layers.fully_connected(fc3,256,scope='fc4')
+        fc4=tf.contrib.layers.fully_connected(fc3,256,scope='fc4',normalizer_params=normalizer_params)
 
         normalizer_params['scope']='fc5/bn'
         fc4=tf.contrib.layers.dropout(fc4,0.7,is_training=is_training)
