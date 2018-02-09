@@ -1,18 +1,54 @@
 import threading
 import random
 from concurrent.futures import ThreadPoolExecutor
+from multiprocessing import Process,Semaphore,Event,Lock,Queue
 import math
+import sys
 import numpy as np
 
 
+def default_batch_fn(file_data, cur_idx, data_indices, require_size):
+    '''
+    :param file_data:     [block_points_list,block_labels_list]
+    :param cur_idx:
+    :param data_indices:
+    :param require_size:
+    :return: [points_list,labels_list],size
+    '''
+    end_idx = min(cur_idx + require_size, len(file_data[0]))
+    batch_data=[]
+    for data_idx in xrange(len(file_data)):
+        batch_data.append(file_data[data_idx][data_indices[cur_idx:end_idx]])
+
+    return batch_data , end_idx - cur_idx
+
+
+def default_batch_fn_v2(file_data, cur_idx, data_indices, require_size):
+    '''
+    :param file_data:     [block_points_list,block_labels_list]
+    :param cur_idx:
+    :param data_indices:
+    :param require_size:
+    :return: [points_list,labels_list],size
+    '''
+    end_idx = min(cur_idx + require_size, len(file_data[0]))
+    batch_data=[]
+    for data_idx in xrange(len(file_data)):
+        cur_data=[]
+        for idx in data_indices[cur_idx:end_idx]:
+            cur_data.append(file_data[data_idx][idx])
+        batch_data.append(cur_data)
+
+    return batch_data , end_idx - cur_idx
+
+
 class ProviderV2(threading.Thread):
-    def __init__(self,file_list,model,batch_size,batch_fn,read_fn,max_cache=2):
+    def __init__(self,file_list,model,batch_size,read_fn,batch_fn=default_batch_fn,max_cache=2):
         threading.Thread.__init__(self)
 
         self.slots=threading.Semaphore(max_cache)
         self.items=threading.Semaphore(0)
         self.mutex=threading.Lock()
-        self.epoch_end=threading.Event()
         self.thread_end=threading.Event()
         self.data_cache=[]
 
@@ -34,6 +70,7 @@ class ProviderV2(threading.Thread):
         self.request_data()
 
     def run(self):
+        model=self.model
         while True:
             for idx in self.indices:
                 self.slots.acquire()
@@ -41,13 +78,9 @@ class ProviderV2(threading.Thread):
                 if self.thread_end.is_set():
                     exit(0)
 
-                self.data_cache.append(self.read_fn(self.file_list[idx]))
+                self.data_cache.append(self.read_fn(model,self.file_list[idx]))
                 self.mutex.release()
                 self.items.release()
-
-            # wait for reset
-            self.epoch_end.clear()
-            self.epoch_end.wait()
 
             if self.model=='train':
                 random.shuffle(self.indices)
@@ -75,12 +108,10 @@ class ProviderV2(threading.Thread):
 
     def reset(self):
         self.file_cur=0
-        self.epoch_end.set()
 
     def close(self):
         self.thread_end.set()
         self.slots.release()
-        self.epoch_end.set()
 
     def __iter__(self):
         return self
@@ -114,6 +145,121 @@ class ProviderV2(threading.Thread):
                 left_size -= actual_size
                 self.cur_data_index += actual_size
             else: break
+
+        return batch_data
+
+
+class ProviderV3(threading.Thread):
+    def __init__(self, file_list, model, batch_size, read_fn, batch_fn=default_batch_fn_v2, max_cache=2):
+        threading.Thread.__init__(self)
+
+        self.slots = threading.Semaphore(max_cache)
+        self.items = threading.Semaphore(0)
+        self.mutex = threading.Lock()
+        self.thread_end = threading.Event()
+        self.data_cache = []
+
+        self.file_list = tuple(file_list)
+        self.file_len = len(self.file_list)
+        self.indices = range(len(file_list))
+
+        self.file_cur = 0
+
+        self.model = model
+        self.read_fn = read_fn
+        self.batch_fn = batch_fn
+
+        self.batch_size = batch_size
+        self.done = False
+
+        self.start()
+
+        self.request_data()
+
+    def run(self):
+        model = self.model
+        while True:
+            for idx in self.indices:
+                self.slots.acquire()
+                self.mutex.acquire()
+                if self.thread_end.is_set():
+                    exit(0)
+
+                self.data_cache.append(self.read_fn(model, self.file_list[idx]))
+                self.mutex.release()
+                self.items.release()
+
+            if self.model == 'train':
+                random.shuffle(self.indices)
+
+    def request_data(self):
+        # print 'request'
+        if self.file_cur >= self.file_len:
+            self.cur_data = None
+            return
+
+        self.items.acquire()
+        self.mutex.acquire()
+        file_data = self.data_cache.pop(0)
+        self.mutex.release()
+        self.slots.release()
+
+        self.file_cur += 1
+
+        self.cur_data = file_data
+        if self.cur_data is not None:
+            self.cur_data_index = 0
+            self.cur_indices = range(len(self.cur_data[0]))
+            if self.model == 'train':
+                random.shuffle(self.cur_indices)
+
+    def reset(self):
+        self.file_cur = 0
+
+    def close(self):
+        self.thread_end.set()
+        self.slots.release()
+
+    def __iter__(self):
+        return self
+
+    def next(self):
+        if self.done:
+            self.done = False
+            self.reset()
+            self.request_data()
+            raise StopIteration
+
+        batch_data, actual_size = self.batch_fn(self.cur_data, self.cur_data_index, self.cur_indices,
+                                                self.batch_size)
+        # for data in batch_data[0]:
+        #     print data.shape
+        # print '////////////////////'
+
+        self.cur_data_index += actual_size
+
+        left_size = self.batch_size - actual_size
+
+        while self.cur_data_index >= len(self.cur_data[0]):
+            self.request_data()
+
+            # no data available
+            if self.cur_data is None:
+                self.done = True
+                break
+
+            # data available and we still need to sample
+            if left_size > 0:
+                left_batch_data, actual_size = self.batch_fn(self.cur_data, self.cur_data_index, self.cur_indices,
+                                                             left_size)
+
+                for data_idx in xrange(len(batch_data)):
+                    batch_data[data_idx]+=left_batch_data[data_idx]
+
+                left_size -= actual_size
+                self.cur_data_index += actual_size
+            else:
+                break
 
         return batch_data
 

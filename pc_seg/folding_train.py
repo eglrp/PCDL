@@ -37,7 +37,7 @@ FLAGS = parser.parse_args()
 def tower_loss(points,covars,grids,color_ratio,reuse=False,decode_dim=6):
     with tf.variable_scope(tf.get_variable_scope(),reuse=reuse):
         points_covars=tf.concat([points,covars],axis=2)
-        codewords=vanilla_pointnet_encoder(points_covars, reuse)
+        codewords,_=vanilla_pointnet_encoder(points_covars, reuse)
         gen_points=folding_net_decoder(codewords, grids, decode_dim, reuse)
 
     # ref_points,_=tf.split(points,2,axis=2)
@@ -185,22 +185,23 @@ def test_one_epoch(ops,pls,sess,saver,testset,epoch_num,feed_dict):
         test_loss.append(loss/FLAGS.num_gpus)
 
         # output generated points
-        if left_size>0 and random.random()<0.3:
-            idx=np.random.randint(0,points_list.shape[0],dtype=np.int)
-            # colors=np.asarray(points_list[idx,:,3:]*128+128,dtype=np.int)
-            # fn=os.path.join(FLAGS.dump_dir,'{}_{}_true.txt'.format(epoch_num,left_size))
-            # output_points(fn,points_list[idx,:,:3],colors)
-            fn=os.path.join(FLAGS.dump_dir,'{}_{}_true.txt'.format(epoch_num,left_size))
-            output_points(fn,points_list[idx,:,:3])
+        for _ in range(3):
+            if left_size>0 and random.random()<0.8:
+                idx=np.random.randint(0,points_list.shape[0],dtype=np.int)
+                # colors=np.asarray(points_list[idx,:,3:]*128+128,dtype=np.int)
+                # fn=os.path.join(FLAGS.dump_dir,'{}_{}_true.txt'.format(epoch_num,left_size))
+                # output_points(fn,points_list[idx,:,:3],colors)
+                fn=os.path.join(FLAGS.dump_dir,'{}_{}_true.txt'.format(epoch_num,left_size))
+                output_points(fn,points_list[idx,:,:3])
 
-            # colors=np.asarray(gen_pts[idx,:,3:]*128+128,dtype=np.int)
-            # colors[colors>255]=255
-            # colors[colors<0]=0
-            # fn=os.path.join(FLAGS.dump_dir,'{}_{}_recon.txt'.format(epoch_num,left_size))
-            # output_points(fn,gen_pts[idx,:,:3],colors)
-            fn=os.path.join(FLAGS.dump_dir,'{}_{}_recon.txt'.format(epoch_num,left_size))
-            output_points(fn,gen_pts[idx,:,:3])
-            left_size-=1
+                # colors=np.asarray(gen_pts[idx,:,3:]*128+128,dtype=np.int)
+                # colors[colors>255]=255
+                # colors[colors<0]=0
+                # fn=os.path.join(FLAGS.dump_dir,'{}_{}_recon.txt'.format(epoch_num,left_size))
+                # output_points(fn,gen_pts[idx,:,:3],colors)
+                fn=os.path.join(FLAGS.dump_dir,'{}_{}_recon.txt'.format(epoch_num,left_size))
+                output_points(fn,gen_pts[idx,:,:3])
+                left_size-=1
 
     test_loss=np.mean(np.asarray(test_loss))
     log_str('epoch {} test_loss {} cost {} s'.format(epoch_num,test_loss,time.time()-begin_time),FLAGS.log_file)
@@ -212,16 +213,12 @@ def test_one_epoch(ops,pls,sess,saver,testset,epoch_num,feed_dict):
 def train():
     pt_num=4096
 
-    # train_list,test_list = prepare_train_test_v2()
-    # total_size=len(train_list)
-
-    # train_list=['data/S3DIS/folding/block_train/block_train{}.h5'.format(i) for i in range(22)]
-    # test_list=['data/S3DIS/folding/block_train/block_test{}.h5'.format(i) for i in range(9)]
     train_list,test_list=get_train_test_split()
+    train_list+=test_list
     train_list=['data/S3DIS/folding/block_v2/'+fn+'.h5' for fn in train_list]
-    test_list=['data/S3DIS/folding/block_v2/'+fn+'.h5' for fn in test_list]
+    test_list=['data/S3DIS/folding/block_v2/'+fn+'.h5' for fn in test_list[:5]]
 
-    read_fn=lambda fn: read_block_v2(fn)[:2]
+    read_fn=lambda model,fn: read_block_v2(fn)[:2]
 
     train_provider = ProviderV2(train_list,'train',FLAGS.batch_size*FLAGS.num_gpus,batch_fn,read_fn,2)
     test_provider = ProviderV2(test_list,'test',FLAGS.batch_size*FLAGS.num_gpus,batch_fn,read_fn,2)
@@ -246,8 +243,9 @@ def train():
 
         saver = tf.train.Saver(max_to_keep=500)
         summary_writer = tf.summary.FileWriter(FLAGS.train_dir,graph=sess.graph)
+        saver.restore(sess,'model/unsupervise255.ckpt')
 
-        for epoch_num in xrange(FLAGS.train_epoch_num):
+        for epoch_num in xrange(255,FLAGS.train_epoch_num):
             train_one_epoch(ops,pls,sess,summary_writer,train_provider,epoch_num,feed_dict)
             test_one_epoch(ops,pls,sess,saver,test_provider,epoch_num,feed_dict)
 

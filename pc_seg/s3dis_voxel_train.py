@@ -9,25 +9,28 @@ import random
 from autoencoder_network import vanilla_pointnet_encoder,fc_voxel_decoder,voxel_color_loss,voxel_filling_loss
 from s3dis.draw_util import output_points
 from s3dis.block_util import read_block_v2
+from s3dis.data_util import get_train_test_split
+from s3dis.voxel_util import points2voxel_color_gpu, voxel2points
 
 from train_util import log_str,average_gradients
 from provider import ProviderV2
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--num_gpus', type=int, default=1, help='')
-parser.add_argument('--batch_size', type=int, default=1, help='')
+parser.add_argument('--num_gpus', type=int, default=4, help='')
+parser.add_argument('--batch_size', type=int, default=64, help='')
 
 parser.add_argument('--lr_init', type=float, default=1e-4, help='')
 parser.add_argument('--decay_rate', type=float, default=0.9, help='')
 parser.add_argument('--decay_epoch', type=int, default=10, help='')
 
-parser.add_argument('--log_step', type=int, default=100, help='')
-parser.add_argument('--train_dir', type=str, default='train', help='')
-parser.add_argument('--save_dir', type=str, default='model', help='')
-parser.add_argument('--log_file', type=str, default='train.log', help='')
+parser.add_argument('--log_step', type=int, default=20, help='')
+parser.add_argument('--train_dir', type=str, default='train/voxel', help='')
+parser.add_argument('--save_dir', type=str, default='model/voxel', help='')
+parser.add_argument('--log_file', type=str, default='train_voxel.log', help='')
 
-parser.add_argument('--dump_dir', type=str, default='unsupervise', help='')
+parser.add_argument('--dump_dir', type=str, default='unsupervise/voxel', help='')
 parser.add_argument('--dump_num', type=int, default=10, help='')
+parser.add_argument('--split_num', type=int, default=30, help='')
 
 parser.add_argument('--train_epoch_num', type=int, default=500, help='')
 FLAGS = parser.parse_args()
@@ -36,18 +39,16 @@ FLAGS = parser.parse_args()
 def tower_loss(points, covars, true_color, true_state, voxel_num, reuse=False):
     with tf.variable_scope(tf.get_variable_scope(),reuse=reuse):
         points=tf.concat([points,covars],axis=2)
-        codewords=vanilla_pointnet_encoder(points, reuse)
+        codewords,_=vanilla_pointnet_encoder(points, reuse)
         voxel_state,voxel_color=fc_voxel_decoder(codewords, voxel_num, True, reuse)
 
-
-    color_loss=voxel_color_loss(voxel_color,true_color)
-    filling_loss=voxel_filling_loss(voxel_state,true_state)
-    loss=color_loss+filling_loss
-
+    color_loss=voxel_color_loss(voxel_color, true_state, true_color)
+    filling_loss=voxel_filling_loss(voxel_state, true_state)
+    loss=tf.add(color_loss,filling_loss,name='total_loss')
     tf.add_to_collection(tf.GraphKeys.LOSSES,loss)
 
-    tf.summary.scalar(loss.op.name,color_loss)
-    tf.summary.scalar(loss.op.name,filling_loss)
+    tf.summary.scalar(color_loss.op.name,color_loss)
+    tf.summary.scalar(filling_loss.op.name,filling_loss)
     tf.summary.scalar(loss.op.name,loss)
 
     return loss,voxel_state,voxel_color
@@ -115,45 +116,48 @@ def train_ops(points, covars, true_color, true_state, voxel_num, epoch_batch_num
     return ops
 
 
-def batch_fn(file_data, cur_idx, data_indices, require_size):
-    points,covars=file_data
-    end_idx=min(cur_idx + require_size, points.shape[0])
-    # todo: points2voxel
+def read_fn(model,filename):
+    points,covars=read_block_v2(filename)[:2]
+    voxel_state,voxel_color=points2voxel_color_gpu(points,FLAGS.split_num,1)
 
-    return (points[data_indices[cur_idx:end_idx],:],
-           covars[data_indices[cur_idx:end_idx],:]),end_idx-cur_idx
+    return points, covars, voxel_state, voxel_color
+
+
+def batch_fn(file_data, cur_idx, data_indices, require_size):
+    points, covars, voxel_state, voxel_color = file_data
+    end_idx = min(cur_idx + require_size, points.shape[0])
+
+    return [points[data_indices[cur_idx:end_idx], :, :],
+            covars[data_indices[cur_idx:end_idx], :, :],
+            voxel_state[data_indices[cur_idx:end_idx], :],
+            voxel_color[data_indices[cur_idx:end_idx], :, :]
+            ], end_idx - cur_idx
 
 
 def unpack_feats_labels(batch,num_gpus):
-    points_list, covars_list = batch
+    points_list, covars_list, voxel_state_list, voxel_color_list = batch
     if points_list.shape[0]%num_gpus!=0:
         left_num=(points_list.shape[0]/num_gpus+1)*num_gpus-points_list.shape[0]
         left_idx = np.random.randint(0, points_list.shape[0], left_num)
         points_list=np.concatenate([points_list,points_list[left_idx,:]],axis=0)
         covars_list=np.concatenate([covars_list,covars_list[left_idx,:]],axis=0)
+        voxel_state_list=np.concatenate([voxel_state_list,voxel_state_list[left_idx,:]],axis=0)
+        voxel_color_list=np.concatenate([voxel_color_list,voxel_color_list[left_idx,:]],axis=0)
 
-    return points_list, covars_list
-
-
-def generate_grids():
-    x=np.arange(-8,8)
-    y=np.arange(-8,8)
-    z=np.arange(0,16)
-    X,Y,Z=np.meshgrid(x,y,z)
-    grids=np.concatenate([X[:,:,:,None],Y[:,:,:,None],Z[:,:,:,None]],axis=3)
-    grids=np.reshape(grids,[-1,3])
-    grids=np.asarray(grids,dtype=np.float32)/8.0
-    return grids
+    return points_list, covars_list, voxel_state_list, voxel_color_list
 
 
 def train_one_epoch(ops,pls,sess,summary_writer,trainset,epoch_num,feed_dict):
     total=0
     begin_time=time.time()
     for i,feed_in in enumerate(trainset):
-        points_list, covars_list=unpack_feats_labels(feed_in,FLAGS.num_gpus)
+        points_list, covars_list, voxel_state_list, voxel_color_list=\
+            unpack_feats_labels(feed_in,FLAGS.num_gpus)
 
-        feed_dict[pls['points']]=points_list[:,:,:3]
+        feed_dict[pls['points']]=points_list
         feed_dict[pls['covars']]=covars_list
+        feed_dict[pls['voxel_state']]=voxel_state_list
+        feed_dict[pls['voxel_color']]=voxel_color_list
         total+=points_list.shape[0]
 
         sess.run(ops['apply_grad'],feed_dict)
@@ -163,7 +167,7 @@ def train_one_epoch(ops,pls,sess,summary_writer,trainset,epoch_num,feed_dict):
                 [ops['total_loss'],ops['summary'],ops['global_step']],feed_dict)
 
             log_str('epoch {} step {} loss {:.5} | {:.5} examples/s'.format(
-                epoch_num,i,total_loss,float(total)/(time.time()-begin_time)
+                epoch_num,i,total_loss/FLAGS.num_gpus,float(total)/(time.time()-begin_time)
             ),FLAGS.log_file)
 
             summary_writer.add_summary(summary,global_step)
@@ -177,32 +181,51 @@ def test_one_epoch(ops,pls,sess,saver,testset,epoch_num,feed_dict):
     test_loss=[]
     left_size=FLAGS.dump_num
     for i,feed_in in enumerate(testset):
-        points_list, covars_list=unpack_feats_labels(feed_in,FLAGS.num_gpus)
+        points_list, covars_list, voxel_state_list, voxel_color_list=\
+            unpack_feats_labels(feed_in,FLAGS.num_gpus)
 
-        feed_dict[pls['points']]=points_list[:,:,:3]
+        feed_dict[pls['points']]=points_list
         feed_dict[pls['covars']]=covars_list
+        feed_dict[pls['voxel_state']]=voxel_state_list
+        feed_dict[pls['voxel_color']]=voxel_color_list
         total+=points_list.shape[0]
 
-        loss,gen_pts=sess.run([ops['total_loss'],ops['gen_pts']],feed_dict)
+        loss,gen_state,gen_color=sess.run([ops['total_loss'],ops['voxel_state'],ops['voxel_color']],feed_dict)
         test_loss.append(loss/FLAGS.num_gpus)
 
-        # output generated points
-        if left_size>0 and random.random()<0.3:
-            idx=np.random.randint(0,points_list.shape[0],dtype=np.int)
-            # colors=np.asarray(points_list[idx,:,3:]*128+128,dtype=np.int)
-            # fn=os.path.join(FLAGS.dump_dir,'{}_{}_true.txt'.format(epoch_num,left_size))
-            # output_points(fn,points_list[idx,:,:3],colors)
-            fn=os.path.join(FLAGS.dump_dir,'{}_{}_true.txt'.format(epoch_num,left_size))
-            output_points(fn,points_list[idx,:,:3])
+        # output generated voxels
+        for i in range(3):
+            if left_size>0 and random.random()<0.9:
+                idx=np.random.randint(0,points_list.shape[0],dtype=np.int)
 
-            # colors=np.asarray(gen_pts[idx,:,3:]*128+128,dtype=np.int)
-            # colors[colors>255]=255
-            # colors[colors<0]=0
-            # fn=os.path.join(FLAGS.dump_dir,'{}_{}_recon.txt'.format(epoch_num,left_size))
-            # output_points(fn,gen_pts[idx,:,:3],colors)
-            fn=os.path.join(FLAGS.dump_dir,'{}_{}_recon.txt'.format(epoch_num,left_size))
-            output_points(fn,gen_pts[idx,:,:3])
-            left_size-=1
+                pts=points_list[idx,:,:]
+                pts[:,:2]+=0.5
+                pts[:,3:]+=1.0
+                pts[:,3:]*=127
+                fn=os.path.join(FLAGS.dump_dir,'{}_{}_points.txt'.format(epoch_num,left_size))
+                output_points(fn,pts)
+
+                true_state_pts=voxel2points(voxel_state_list[idx])
+                fn=os.path.join(FLAGS.dump_dir,'{}_{}_state_true.txt'.format(epoch_num,left_size))
+                output_points(fn,true_state_pts)
+
+                gen_state[idx][gen_state[idx]<0.0]=0.0
+                gen_state[idx][gen_state[idx]>1.0]=1.0
+                pred_state_pts=voxel2points(gen_state[idx])
+                fn=os.path.join(FLAGS.dump_dir,'{}_{}_state_pred.txt'.format(epoch_num,left_size))
+                output_points(fn,pred_state_pts)
+
+                true_color_pts=voxel2points(voxel_color_list[idx])
+                fn = os.path.join(FLAGS.dump_dir, '{}_{}_color_true.txt'.format(epoch_num, left_size))
+                output_points(fn, true_color_pts)
+
+                gen_color[idx][gen_color[idx]<0.0]=0.0
+                gen_color[idx][gen_color[idx]>1.0]=1.0
+                pred_color_pts=voxel2points(gen_color[idx])
+                fn = os.path.join(FLAGS.dump_dir, '{}_{}_color_pred.txt'.format(epoch_num, left_size))
+                output_points(fn, pred_color_pts)
+
+                left_size-=1
 
     test_loss=np.mean(np.asarray(test_loss))
     log_str('epoch {} test_loss {} cost {} s'.format(epoch_num,test_loss,time.time()-begin_time),FLAGS.log_file)
@@ -213,29 +236,27 @@ def test_one_epoch(ops,pls,sess,saver,testset,epoch_num,feed_dict):
 
 def train():
     pt_num=4096
+    voxel_num=FLAGS.split_num*FLAGS.split_num*FLAGS.split_num
 
-    # train_list,test_list = prepare_train_test_v2()
-    # total_size=len(train_list)
-
-    train_list=['data/S3DIS/folding/block_train/block_train{}.h5'.format(i) for i in range(22)]
-    test_list=['data/S3DIS/folding/block_train/block_test{}.h5'.format(i) for i in range(9)]
-
-    read_fn=lambda fn: read_block_v2(fn)[:2]
+    train_list,test_list=get_train_test_split()
+    train_list+=test_list
+    train_list=['data/S3DIS/folding/block_v2/{}.h5'.format(fn) for fn in train_list]
+    test_list=['data/S3DIS/folding/block_v2/{}.h5'.format(fn) for fn in test_list]
 
     train_provider = ProviderV2(train_list,'train',FLAGS.batch_size*FLAGS.num_gpus,batch_fn,read_fn,2)
-    test_provider = ProviderV2(test_list,'test',FLAGS.batch_size*FLAGS.num_gpus,batch_fn,read_fn,2)
+    test_provider = ProviderV2(test_list[:5],'test',FLAGS.batch_size*FLAGS.num_gpus,batch_fn,read_fn,2)
 
     try:
         pls={}
-        pls['points']=tf.placeholder(tf.float32,[None,pt_num,3],'points')
+        pls['points']=tf.placeholder(tf.float32,[None,pt_num,6],'points')
         pls['covars']=tf.placeholder(tf.float32,[None,pt_num,9],'covars')
-        pls['grids']=tf.placeholder(tf.float32,[4096,3],'grids')
-        ops=train_ops(pls['points'],pls['covars'],pls['grids'],22000/(FLAGS.batch_size*FLAGS.num_gpus))
+        pls['voxel_state']=tf.placeholder(tf.float32,[None,voxel_num],'voxel_state')
+        pls['voxel_color']=tf.placeholder(tf.float32,[None,voxel_num,3],'voxel_color')
+        ops=train_ops(pls['points'],pls['covars'],pls['voxel_color'],pls['voxel_state'],
+                      voxel_num,26000/(FLAGS.batch_size*FLAGS.num_gpus))
 
         # compute grids
         feed_dict = {}
-        feed_dict[pls['grids']]=generate_grids()
-
         config = tf.ConfigProto()
         config.gpu_options.allow_growth = True
         config.allow_soft_placement = True
@@ -256,17 +277,28 @@ def train():
 
 
 def test_data_iter():
-    train_list=['data/S3DIS/folding/block_v2/5_Area_1_hallway_3.h5']
-    read_fn=lambda fn: read_block_v2(fn)[:2]
+    train_list,test_list=get_train_test_split()
+    train_list+=test_list
+    train_list=['data/S3DIS/folding/block_v2/{}.h5'.format(fn) for fn in train_list]
+    # test_list=['data/S3DIS/folding/block_v2/{}.h5'.format(fn) for fn in test_list]
 
-    train_provider = ProviderV2(train_list,'train',20,batch_fn,read_fn,2)
-    for data in train_provider:
-        print data[0].shape,data[1].shape
+    train_provider = ProviderV2(train_list,'train',32,batch_fn,read_fn,2)
 
+    begin=time.time()
     for data in train_provider:
-        print data[0].shape, data[1].shape
+        for item in data:
+            print item.shape
+        print 'cost {} s'.format(time.time()-begin)
+        begin=time.time()
+        # print data[0].shape,data[1].shape
+
+    begin=time.time()
+    for data in train_provider:
+        print 'cost {} s'.format(time.time()-begin)
+        begin=time.time()
+        # print data[0].shape, data[1].shape
 
     train_provider.close()
 
 if __name__=="__main__":
-    test_data_iter()
+    train()

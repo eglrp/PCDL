@@ -1,7 +1,8 @@
+import math
 import os
 import h5py
 import numpy as np
-import math
+import cPickle
 
 
 def get_class_names():
@@ -44,6 +45,26 @@ def get_train_test_split(test_area=5):
     return train, test
 
 
+def get_block_train_test_split(test_area=5):
+    '''
+    :param test_area: default use area 5 as testset
+    :return:
+    '''
+    path = os.path.split(os.path.realpath(__file__))[0]
+    f = open(path + '/room_block_stems.txt', 'r')
+    file_stems = [line.strip('\n') for line in f.readlines()]
+    f.close()
+
+    train, test = [], []
+    for fs in file_stems:
+        if fs.split('_')[2] == str(test_area):
+            test.append(fs)
+        else:
+            train.append(fs)
+
+    return train, test
+
+
 def read_room_h5(room_h5_file):
     f=h5py.File(room_h5_file,'r')
     data,label = f['data'][:],f['label'][:]
@@ -69,6 +90,17 @@ def get_class_colors():
             [105,105,105],
             [205,92,92]],dtype=np.int)
     return colors
+
+
+def save_room_pkl(filename,points,labels):
+    with open(filename,'wb') as f:
+        cPickle.dump((points,labels),f,protocol=2)
+
+
+def read_room_pkl(filename):
+    with open(filename,'rb') as f:
+        points,labels=cPickle.load(f)
+    return points,labels
 
 
 def downsample_average(points, sample_stride=0.1):
@@ -257,12 +289,22 @@ def compute_iou(label,pred):
     fp = np.zeros(13, dtype=np.int)
     tp = np.zeros(13, dtype=np.int)
     fn = np.zeros(13, dtype=np.int)
-    for l, p in zip(label, pred):
-        if l == p:
-            tp[l] += 1
-        else:
-            fp[p] += 1
-            fn[l] += 1
+    # for l, p in zip(label, pred):
+    #     if l == p:
+    #         tp[l] += 1
+    #     else:
+    #         fp[p] += 1
+    #         fn[l] += 1
+
+    correct_mask=label==pred
+    incorrect_mask=label!=pred
+    for i in range(13):
+        label_mask=label==i
+        pred_mask=pred==i
+
+        tp[i]=np.sum(correct_mask&label_mask)
+        fn[i]=np.sum(incorrect_mask&label_mask)
+        fp[i]=np.sum(incorrect_mask&pred_mask)
 
     iou = tp / (fp + fn + tp + 1e-6).astype(np.float)
     miou=np.mean(iou)
@@ -274,120 +316,5 @@ def compute_iou(label,pred):
     return iou, miou, oiou, acc, macc, oacc
 
 
-import math
-import pyflann
-def neighbor_idxs(x,y,z,order=2,attach_origin=True):
-    xs=np.asarray([x-i for i in xrange(-order,order+1)],dtype=np.int32)
-    ys=np.asarray([y-i for i in xrange(-order,order+1)],dtype=np.int32)
-    zs=np.asarray([z-i for i in xrange(-order,order+1)],dtype=np.int32)
-    X,Y,Z=np.meshgrid(xs,ys,zs)
-    coords=np.concatenate([X[:,:,:,None],Y[:,:,:,None],Z[:,:,:,None]],axis=3)
-    coords=np.reshape(coords,[-1,3])
-
-    # if attach_origin:
-    #     origin=np.asarray([[x,y,z]])
-    #     coords=np.concatenate([coords,origin],axis=0)
-
-    return coords
-
-
-def validate_idx(x,y,z,max_num):
-    if 0<=x<max_num and \
-        0<=y<max_num and \
-        0<=z<max_num:
-        return True
-    else:
-        return False
-
-
-def compute_dist(pt, idx, stride):
-    return ((pt[0] - (idx[0]+0.5)*stride) ** 2 +
-             (pt[1] - (idx[1]+0.5)*stride) ** 2 +
-             (pt[2] - (idx[2]+0.5)*stride) ** 2)
-
-
-def point2voxel(points,split_num):
-    '''
-    :param points:      k,3 already normalize to (0,1)^3 cubic
-    :param split_num:
-    :return:
-    '''
-    stride=1.0/(split_num-1)
-    flann=pyflann.FLANN()
-    flann.build_index(points,algorithm='kdtree_simple',leaf_max_size=3)
-    voxel_state=np.zeros([split_num,split_num,split_num],dtype=np.float32)
-
-    for pt in points:
-        _,dists=flann.nn_index(pt,6)
-        radius=np.mean(dists[0,1:])
-
-        x_index=int(math.ceil(pt[0]/stride))
-        y_index=int(math.ceil(pt[1]/stride))
-        z_index=int(math.ceil(pt[2]/stride))
-        nidxs=neighbor_idxs(x_index,y_index,z_index,1)
-        all_vals=np.empty(nidxs.shape[0])
-        for i,idx in enumerate(nidxs):
-            if validate_idx(idx[0],idx[1],idx[2],split_num):
-                dist=compute_dist(pt, idx, stride)
-                val=1-dist/radius
-                all_vals[i]=val if val>0.0 else 0.0
-            else:
-                all_vals[i]=0.0
-
-        for val,idx in zip(all_vals,nidxs):
-            if validate_idx(idx[0],idx[1],idx[2],split_num):
-                voxel_state[idx[0],idx[1],idx[2]]+=val
-
-    voxel_state[voxel_state>1.0]=1.0
-
-    voxel_state=np.asarray(voxel_state.flatten())
-    return voxel_state
-
-
-def voxel2points(voxel):
-    '''
-    :param voxel:
-    :return:
-    '''
-    if len(voxel.shape)==1:
-        side_num=int(round(pow(voxel.shape[0], 1 / 3.0)))
-        cubic_state=np.reshape(voxel, [side_num, side_num, side_num])
-        pts=[]
-        for i in xrange(side_num):
-            for j in xrange(side_num):
-                for k in xrange(side_num):
-                    color_val=int(255 * cubic_state[i, j, k])
-                    coord_val=np.asarray([i,j,k,color_val,color_val,color_val],dtype=np.float32)
-                    pts.append(coord_val)
-
-    else:
-        side_num=int(round(pow(voxel.shape[0], 1 / 3.0)))
-        cubic_state=np.reshape(voxel, [side_num, side_num, side_num, 3])
-        pts=[]
-        for i in xrange(side_num):
-            for j in xrange(side_num):
-                for k in xrange(side_num):
-                    color_val=np.asarray(128 * cubic_state[i, j, k, :]+128, np.int32)
-                    color_val[color_val>255]=255
-                    color_val[color_val<0]=0
-
-                    coord_val=np.asarray([i,j,k,color_val[0],color_val[1],color_val[2]],dtype=np.float32)
-                    pts.append(coord_val)
-
-    pts=np.asarray(pts)
-    return pts
-
-
 if __name__=="__main__":
-    from draw_util import output_points
-    import time
-    points=np.loadtxt('/home/pal/tmp/0_2_true.txt',dtype=np.float32)
-    points[:,:2]+=0.5
-    output_points('points.txt',points)
-    voxels=point2voxel(points,30)
-    bg=time.time()
-    voxel_points=voxel2points(voxels)
-    print 'cost {} s'.format(time.time()-bg)
-    voxel_points=voxel_points.astype(np.float32)
-    voxel_points[:,:3]/=np.max(voxel_points[:,:3],axis=0,keepdims=True)
-    output_points('voxels.txt',voxel_points)
+    pass

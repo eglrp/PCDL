@@ -21,7 +21,6 @@ if __name__=="__main__":
     saver = tf.train.Saver(max_to_keep=500)
     what=saver.restore(sess,model_path)
 
-
     path='data/S3DIS/point/fpfh/'
     print 'miou aiou macc oacc'
     colors = get_class_colors()

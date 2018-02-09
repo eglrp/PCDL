@@ -1,7 +1,7 @@
 from autoencoder_network import *
 import numpy as np
 import time
-from s3dis.data_util import voxel2points
+from s3dis.voxel_util import voxel2points
 
 
 def test_whole_folding_net():
@@ -193,7 +193,7 @@ def test_voxel_filling_net():
     points_pl=tf.placeholder(tf.float32,[batch_size,4096,3],'points')
     true_state_pl=tf.placeholder(tf.float32,[batch_size,voxel_num],'voxel_true_state')
 
-    feats=vanilla_pointnet_encoder(points_pl)
+    feats,_=vanilla_pointnet_encoder(points_pl)
     voxel_state=fc_voxel_decoder(feats, voxel_num)
     loss=voxel_filling_loss(voxel_state, true_state_pl)
     opt=tf.train.AdamOptimizer(1e-3)
@@ -230,7 +230,7 @@ def test_voxel_filling_color_net():
     true_state_pl=tf.placeholder(tf.float32,[batch_size,voxel_num],'voxel_true_state')
     true_color_pl=tf.placeholder(tf.float32,[batch_size,voxel_num,3],'voxel_true_color')
 
-    feats=vanilla_pointnet_encoder(points_pl)
+    feats,_=vanilla_pointnet_encoder(points_pl)
     voxel_state,voxel_color=fc_voxel_decoder(feats, voxel_num, True)
 
     filling_loss=voxel_filling_loss(voxel_state, true_state_pl)
@@ -268,28 +268,28 @@ def test_voxel_filling_color_net():
 
 
 def test_points2voxel():
-    from provider import ProviderV2
+    import Points2Voxel
+    from provider import ProviderV2,ProviderV3
     from s3dis.block_util import read_block_v2
-    from s3dis.data_util import point2voxel,get_train_test_split
+    from s3dis.data_util import get_train_test_split
+    from s3dis.voxel_util import points2voxel_color_gpu
+    from s3dis.voxel_util import point2voxel
+    from s3dis.draw_util import output_points
 
     def read_fn(filename):
         points,covars=read_block_v2(filename)[:2]
-        voxels=[]
-        for pts in points:
-            # voxel=point2voxel(pts,30)
-            voxels.append(np.arange(5))
+        voxel_state,voxel_color=points2voxel_color_gpu(points,30)
 
-        voxels=np.asarray(voxels)
-
-        return points, covars, voxels
+        return points, covars, voxel_state, voxel_color
 
     def batch_fn(file_data, cur_idx, data_indices, require_size):
-        points, covars, voxels = file_data
+        points, covars, voxel_state, voxel_color = file_data
         end_idx = min(cur_idx + require_size, points.shape[0])
 
-        return [points[data_indices[cur_idx:end_idx], :],
-                covars[data_indices[cur_idx:end_idx], :],
-                voxels[data_indices[cur_idx:end_idx], :]
+        return [points[data_indices[cur_idx:end_idx], :, :],
+                covars[data_indices[cur_idx:end_idx], :, :],
+                voxel_state[data_indices[cur_idx:end_idx], :],
+                voxel_color[data_indices[cur_idx:end_idx], :, :]
                 ], end_idx - cur_idx
 
     train_list,_=get_train_test_split()
@@ -298,12 +298,36 @@ def test_points2voxel():
     train_provider = ProviderV2(train_list,'train',32, batch_fn, read_fn,2)
 
     begin=time.time()
+    total_begin=time.time()
     for data in train_provider:
-        for item in data:
-            print item.shape
+        # for pts_i,pts in enumerate(data[0][:2]):
+        #     print np.min(pts,axis=0)
+        #     pts[:,3:]+=1.0
+        #     pts[:,3:]*=128
+        #     output_points('original{}.txt'.format(pts_i),pts)
+        #
+        # for vi,v in enumerate(data[2][:2]):
+        #     vpts=voxel2points(v)
+        #     vpts[:,:3]/=np.max(vpts[:,:3],axis=0,keepdims=True)
+        #     print np.min(vpts,axis=0)
+        #     output_points('voxels{}.txt'.format(vi),vpts)
+        #
+        # for vi,v in enumerate(data[3][:2]):
+        #     vpts=voxel2points(v)
+        #     vpts[:,:3]/=np.max(vpts[:,:3],axis=0,keepdims=True)
+        #     print np.min(vpts,axis=0)
+        #     output_points('voxels_color{}.txt'.format(vi),vpts)
 
+        # time.sleep(0.1)
         print 'cost {} s'.format(time.time()-begin)
         begin=time.time()
+        # train_provider.close()
+        # exit(0)
+
+    print 'total cost {} s'.format(time.time()-total_begin)
+    train_provider.close()
+    print ' exit '
+    exit(0)
 
 if __name__=="__main__":
     test_points2voxel()
